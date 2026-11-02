@@ -36,8 +36,16 @@ Always, when "time" is known (from the score or merge.json):
   with no rest in such a bar gets one: Audiveris often writes the rest on
   the top staff only.
 
-Nothing here changes a played note: bars with notes in them are left alone,
-for score.py check to report.
+  "borrow_rests": false
+      Turns off borrow_rests, which process.py otherwise runs last: a short
+      bar whose notes repeat a correct bar elsewhere (any part, any bar, same
+      note lengths and intervals, so a transposed doubling counts) with only
+      rests missing gets that bar's rests. Audiveris drops small rests, and a
+      riff played in several parts shows where they go. The report names the
+      bar each one copied.
+
+Nothing here changes or adds a played note: other bars with notes in them
+are left alone, for score.py check to report.
 """
 from __future__ import annotations
 
@@ -50,6 +58,7 @@ from collections import Counter
 from fractions import Fraction
 from pathlib import Path
 
+import merge
 import score
 
 # Written-to-sounding interval: (diatonic steps, semitones, octaves), and the
@@ -62,6 +71,9 @@ TRANSPOSITIONS = {
     "8va": ((0, 0, 1), 0),
     "8vb": ((0, 0, -1), 0),
 }
+# A rest's <type> by its length in crotchets, for the lengths a rest is put back at.
+NOTE_TYPES = {Fraction(4): "whole", Fraction(2): "half", Fraction(1): "quarter",
+              Fraction(1, 2): "eighth", Fraction(1, 4): "16th", Fraction(1, 8): "32nd"}
 # MusicXML's order for <attributes> children, up to the ones written here.
 ATTRIBUTE_ORDER = ("footnote", "level", "divisions", "key", "time", "staves",
                    "part-symbol", "instruments", "clef", "staff-details", "transpose")
@@ -232,6 +244,118 @@ def write_transposition(part: ET.Element, kind: str, concert: int | None) -> int
                 fifths.text = str(concert + shift)
                 moved += 1
     return moved
+
+
+def _single_voice_events(measure: ET.Element, divisions: Fraction) -> list[tuple] | None:
+    """[("n", crotchets, lowest pitch) | ("r", crotchets, None)] for a bar in
+    one voice; chord members fold into their note. None for anything else
+    (backups, forwards, grace notes, unpitched notes)."""
+    events = []
+    for element in measure:
+        if element.tag in ("backup", "forward"):
+            return None
+        if element.tag != "note":
+            continue
+        if element.find("grace") is not None or element.find("unpitched") is not None:
+            return None
+        length = Fraction(element.findtext("duration") or 0) / divisions
+        if element.find("rest") is not None:
+            events.append(("r", length, None))
+        elif element.find("chord") is not None:
+            if not events or events[-1][0] != "n":
+                return None
+            kind, held, low = events[-1]
+            events[-1] = (kind, held, min(low, score.midi(element)))
+        else:
+            events.append(("n", length, score.midi(element)))
+    return events
+
+
+def _shape(events: list[tuple]) -> tuple:
+    notes = [e for e in events if e[0] == "n"]
+    return (tuple(e[1] for e in notes),
+            tuple(b[2] - a[2] for a, b in zip(notes, notes[1:])))
+
+
+def _rests_to_insert(short: list[tuple], donor: list[tuple]) -> list[tuple[int, Fraction]] | None:
+    """Where `donor`'s rests go in `short`, if `short` is `donor` with only
+    rests missing: [(position in short, rest length)]. Else None."""
+    inserts, i = [], 0
+    for event in donor:
+        if i < len(short) and short[i][0] == event[0] and short[i][1] == event[1]:
+            i += 1
+        elif event[0] == "r":
+            inserts.append((i + len(inserts), event[1]))
+        else:
+            return None
+    return inserts if i == len(short) and inserts else None
+
+
+def borrow_rests(root: ET.Element, assume: Fraction | None = None) -> list[str]:
+    """Fill short bars whose notes repeat a correct bar elsewhere (any part,
+    any bar: same note lengths, same intervals, so transposed doublings
+    count) but with rests missing, with that bar's rests. Audiveris drops
+    small rests; a riff played in several parts, or again later, shows
+    where they go. Notes are never changed or added, and nothing is done
+    when the matching bars disagree on where the rests go."""
+    names = dict(score.part_names(root))
+    good: list[tuple[str, str, list[tuple]]] = []
+    short: list[tuple[str, ET.Element, list[tuple], Fraction]] = []
+    for part in root.findall("part"):
+        name = names.get(part.get("id"), part.get("id"))
+        bad = {b.number: b for b in score.bad_bars(part, assume)}
+        states = merge.attribute_states(part)
+        for measure, state in zip(part.findall("measure"), states):
+            divisions = _divisions(measure, state)
+            if divisions is None:
+                continue
+            events = _single_voice_events(measure, divisions)
+            if not events or not any(e[0] == "n" for e in events):
+                continue
+            number = measure.get("number") or "?"
+            if number not in bad:
+                good.append((name, number, events))
+            elif bad[number].holds < bad[number].expected:
+                short.append((name, measure, events, divisions))
+    fixed = []
+    for name, measure, events, divisions in short:
+        options = {}
+        for donor_name, donor_number, donor in good:
+            if _shape(donor) != _shape(events):
+                continue
+            inserts = _rests_to_insert(events, donor)
+            if inserts:
+                options.setdefault(tuple(inserts), f"{donor_name} bar {donor_number}")
+        if len(options) != 1:
+            continue
+        (inserts, source), = options.items()
+        if any((length * divisions).denominator != 1 for _, length in inserts):
+            continue
+        template = measure.find("note")
+        for position, length in inserts:
+            rest = ET.Element("note")
+            ET.SubElement(rest, "rest")
+            ET.SubElement(rest, "duration").text = str((length * divisions).numerator)
+            if template.findtext("voice"):
+                ET.SubElement(rest, "voice").text = template.findtext("voice")
+            if length in NOTE_TYPES:
+                ET.SubElement(rest, "type").text = NOTE_TYPES[length]
+            if template.findtext("staff"):
+                ET.SubElement(rest, "staff").text = template.findtext("staff")
+            notes = [n for n in measure.findall("note") if n.find("chord") is None]
+            anchor = notes[position] if position < len(notes) else None
+            index = list(measure).index(anchor) if anchor is not None else len(measure)
+            measure.insert(index, rest)
+        fixed.append(f"{name} bar {measure.get('number')}: {len(inserts)} rest(s) put back, as in {source}")
+    return fixed
+
+
+def _divisions(measure: ET.Element, state: dict) -> Fraction | None:
+    for attributes in measure.findall("attributes"):
+        if attributes.findtext("divisions"):
+            return Fraction(attributes.findtext("divisions"))
+    element = state.get(("divisions", "1"))
+    return Fraction(element.text) if element is not None else None
 
 
 def repair(root: ET.Element, config: dict) -> list[str]:

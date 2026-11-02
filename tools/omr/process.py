@@ -252,6 +252,10 @@ def process(piece: Path, force: bool = False, run=audiveris.run,
                 return False, notes + [f"merge.json: {err}"]
             if second is not None:
                 merge_report += ["", *second_opinion(root, second, table, assume_time)]
+            if table.get("borrow_rests", True):
+                borrowed = repair.borrow_rests(root, assume_time)
+                merge_report += ["", f"rests put back from matching bars: {len(borrowed)}",
+                                 *(f"  {line}" for line in borrowed)]
             score.save(root, merged, like=merged)
             check = score.check(merged, assume_time)
             merge_report += ["", *check]

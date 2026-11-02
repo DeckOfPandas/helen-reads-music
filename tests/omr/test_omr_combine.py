@@ -50,6 +50,54 @@ def test_unison_ties_go_by_name_then_clef():
     assert any("P3 'Voice': ties between" in line for line in report)
 
 
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize("fragment,instrument,agrees", [
+    ("Picc.", "Piccolo", True), ("Picc.", "Oboe", False),
+    ("Tpt.", "Trumpet in Bb", True), ("Trumpet in BL", "Trumpet in Bb", True),
+    ("Clarinet in m", "Clarinet in Bb", True), ("Clarinet in m", "Trumpet in Bb", False),
+    ("V111. II", "Violin II", True), ("V111. II", "Violin I", False), ("VIn. II", "Violin II", True),
+    ("E. Bass", "Electric Bass", True), ("E Bass", "Electric Bass", True), ("E. Bass", "Contrabass", False),
+    ("Cb.", "Contrabass", True), ("Bsn.", "Bassoon", True), ("Bsn.", "Electric Bass", False),
+    ("Pno.", "Piano", True), ("Pno.", "Harp", False), ("Voice", "Violoncello", False),
+])
+def test_names_agree(fragment, instrument, agrees):
+    assert combine.names_agree(fragment, instrument) is agrees
+
+
+def test_doubled_instruments_are_told_apart_by_abbreviation():
+    line = four_crotchets("D5")
+    primary = merged([("M1", "Piccolo", part("M1", [bar(line, 1, attributes())])),
+                      ("M2", "Oboe", part("M2", [bar(line, 1, attributes())]))])
+    second = merged([("P1", "Ob.", part("P1", [bar(line, 1, attributes())])),
+                     ("P2", "Picc.", part("P2", [bar(line, 1, attributes())]))])
+    mapping, _ = combine.align(second, primary, {})
+    assert mapping == {"P1": "Oboe", "P2": "Piccolo"}
+
+
+def test_drums_match_by_stave_position():
+    drums = ('<measure number="1">' + attributes() + "".join(
+        f"<note><unpitched><display-step>{s}</display-step><display-octave>{o}</display-octave></unpitched>"
+        f"<duration>4</duration><voice>1</voice></note>" for s, o in (("F", 4), ("C", 5), ("F", 4), ("C", 5)))
+        + "</measure>")
+    primary = merged([("M1", "Drum Set", f'<part id="M1">{drums}</part>')])
+    second = merged([("P1", "Dr.", f'<part id="P1">{drums}</part>')])
+    mapping, _ = combine.align(second, primary, {})
+    assert mapping == {"P1": "Drum Set"}
+
+
+def test_a_silent_bar_from_an_unmatched_fragment_never_replaces_notes():
+    # Our bar 1 is short but has notes; the second read's is a whole rest
+    # because its fragment was never matched.
+    primary = merged([("M1", "Violin I", part("M1", [bar([("C5", 1)] * 3, 1, attributes())]))])
+    second = merged([("M1", "Violin I", part("M1", [bar(whole_rest(), 1, attributes())]))])
+    report = combine.fill(primary, second)
+    assert report[0] == "bars taken from the second read: 0"
+    assert "DISAGREE" not in report[1]
+    assert score.count_notes(primary.find("part/measure")) == 3
+
+
 def test_a_fragment_matching_nothing_is_left_out():
     primary = merged([("M1", "Oboe", part("M1", [bar(four_crotchets("C5"), 1, attributes())]))])
     second = merged([("P1", "Oboe", part("P1", [bar(four_crotchets("F#4"), 1, attributes())]))])
@@ -87,6 +135,15 @@ def test_bars_both_reads_got_right_but_differently_are_listed():
     second = merged([("M1", "Oboe", part("M1", [bar(four_crotchets("D5"), 1, attributes())]))])
     report = combine.fill(primary, second)
     assert "reads DISAGREE in bar(s) 1" in report[1]
+
+
+def test_the_same_rhythm_at_different_divisions_agrees():
+    primary = merged([("M1", "Oboe", part("M1", [bar(four_crotchets("C5"), 1, attributes()),
+                                                 bar(four_crotchets("D5"), 2)]))])
+    second = merged([("M1", "Oboe", part("M1", [
+        bar(four_crotchets("C5"), 1, attributes(divisions=8), divisions=8),
+        bar(four_crotchets("D5"), 2, divisions=8)]))])
+    assert "DISAGREE" not in combine.fill(primary, second)[1]
 
 
 def test_a_same_named_leftover_fragment_does_not_stand_in_for_the_instrument():

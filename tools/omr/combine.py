@@ -8,14 +8,18 @@ primary read is merged and repaired:
 1. align: each fragment of the second read is matched to one of the
    primary's merged instruments by its notes (the pitch class and onset of
    every note, so an octave misread still matches), over the bars where it
-   has notes. A tie (instruments in unison) goes to the fragment whose name
-   the table maps to that instrument, then to the one with the same clef.
+   has notes; a drum's notes by their position on the stave. A tie
+   (instruments in unison) goes to the instrument the table maps the name
+   to, then to the one the name abbreviates ("Picc.", "V111. II"), then to
+   the one with the same clef.
    A fragment matching nothing well, or still tied, is left out and named.
    No table needs writing for the second read.
 2. The second read is merged with that alignment and repaired with the same
    merge.json settings as the primary.
 3. Bar by bar, for each instrument: a bar that does not add up in the
-   primary is taken from the second read if it adds up there. Bars that add
+   primary is taken from the second read if it adds up there. A bar the
+   second read has silent where the primary has notes is never taken (the
+   second read failed to match that fragment, it did not hear a rest). Bars that add
    up in both reads but hold different notes are listed, since one of them
    is wrong; bars neither read got right are listed too.
 
@@ -63,10 +67,46 @@ def _events(part: ET.Element, only_bars: set[int] | None = None) -> Counter:
                 onset = last_onset = cursor
                 if element.find("grace") is None:
                     cursor += duration
-            pitch = score.midi(element)
+            pitch = _pitch(element)
             if pitch is not None:
                 events[(index, onset, pitch % 12)] += 1
     return events
+
+
+def _pitch(note: ET.Element) -> int | None:
+    """MIDI pitch, or for an unpitched (drum) note its display position."""
+    pitch = score.midi(note)
+    if pitch is None and note.find("unpitched") is not None:
+        step = note.findtext("unpitched/display-step")
+        octave = note.findtext("unpitched/display-octave")
+        if step in score.STEPS and octave and octave.isdigit():
+            pitch = 12 * (int(octave) + 1) + score.STEPS[step]
+    return pitch
+
+
+def _letters(text: str) -> str:
+    return "".join(c for c in text.lower() if c.isalpha())
+
+
+def names_agree(fragment: str, instrument: str) -> bool:
+    """Whether a printed (often abbreviated, often misread) name can stand
+    for the instrument: the letters of its first word, in order, within the
+    instrument's name, starting with the same letter; and a trailing I/II,
+    if either has one, the same. Only the first word, as OCR mangles the
+    rest ("Clarinet in m"). "Picc." ~ Piccolo, "Tpt." ~ Trumpet in Bb,
+    "V111. II" ~ Violin II, "E. Bass" ~ Electric Bass."""
+    words, target = fragment.split(), instrument.split()
+    numeral = lambda ws: ws[-1].lower() if len(ws) > 1 and ws[-1].upper() in ("I", "II", "III") else None
+    if numeral(words) != numeral(target):
+        return False
+    body = _letters(words[0]) if words else ""
+    if len(body) == 1 and len(words) > 1:           # "E. Bass": an initial and a word
+        body += _letters(words[1])
+    whole = _letters(" ".join(target[:-1] if numeral(target) else target))
+    if not body or body[0] != whole[0]:
+        return False
+    rest = iter(whole)
+    return all(letter in rest for letter in body)
 
 
 def _sounding_bars(part: ET.Element) -> set[int]:
@@ -100,9 +140,13 @@ def align(second: ET.Element, primary: ET.Element, aliases: dict) -> tuple[dict[
             continue
         tied = [i for i, s in scores.items() if best - s <= TIE]
         if len(tied) > 1:
-            by_name = [i for i in tied if aliases.get(name) == i]
+            by_table = [i for i in tied if aliases.get(name) == i]
+            by_name = [i for i in tied if names_agree(name, i)]
             by_clef = [i for i in tied if _first_clef(instruments[i]) == _first_clef(part)]
-            tied = by_name if len(by_name) == 1 else (by_clef if len(by_clef) == 1 else tied)
+            for narrowed in (by_table, by_name, by_clef):
+                if len(narrowed) == 1:
+                    tied = narrowed
+                    break
         if len(tied) > 1:
             report.append(f"  {pid} '{name}': ties between {tied} ({best:.0%}), left out")
             continue
@@ -111,8 +155,17 @@ def align(second: ET.Element, primary: ET.Element, aliases: dict) -> tuple[dict[
     return mapping, report
 
 
-def _signature(measure: ET.Element) -> list[tuple]:
-    return [(score.midi(n), n.findtext("duration"), n.find("chord") is not None)
+def _signature(measure: ET.Element, state: dict) -> list[tuple]:
+    """Pitches and lengths in crotchets: two reads may count different ticks
+    per crotchet (divisions) for the same rhythm."""
+    divisions = None
+    for attributes in measure.findall("attributes"):
+        if attributes.findtext("divisions"):
+            divisions = Fraction(attributes.findtext("divisions"))
+    if divisions is None and ("divisions", "1") in state:
+        divisions = Fraction(state[("divisions", "1")].text)
+    divisions = divisions or Fraction(1)
+    return [(_pitch(n), Fraction(n.findtext("duration") or 0) / divisions, n.find("chord") is not None)
             for n in measure.findall("note") if n.find("rest") is None]
 
 
@@ -140,11 +193,16 @@ def fill(primary: ET.Element, second: ET.Element, assume=None) -> list[str]:
             continue
         bad_mine, bad_theirs = _bad_indices(part, assume), _bad_indices(other, assume)
         states = {"p": merge.attribute_states(part), "s": merge.attribute_states(other)}
-        sources = ["s" if i in bad_mine and i not in bad_theirs else "p" for i in range(len(mine))]
+        # A silent bar in the second read where ours has notes is a fragment it
+        # failed to match, not evidence: it is never taken or compared.
+        silent_there = {i for i in range(len(mine))
+                        if score.count_notes(mine[i]) and not score.count_notes(theirs[i])}
+        sources = ["s" if i in bad_mine and i not in bad_theirs and i not in silent_there else "p"
+                   for i in range(len(mine))]
         taken = [mine[i].get("number") for i, s in enumerate(sources) if s == "s"]
         disagree = [mine[i].get("number") for i in range(len(mine))
-                    if i not in bad_mine and i not in bad_theirs
-                    and _signature(mine[i]) != _signature(theirs[i])]
+                    if i not in bad_mine and i not in bad_theirs and i not in silent_there
+                    and _signature(mine[i], states["p"][i]) != _signature(theirs[i], states["s"][i])]
         neither = [mine[i].get("number") for i in range(len(mine)) if i in bad_mine and i in bad_theirs]
         if taken:
             rebuilt, current, previous = [], {}, None

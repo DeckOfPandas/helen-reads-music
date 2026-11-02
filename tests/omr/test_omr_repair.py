@@ -13,7 +13,7 @@ sys.path.insert(0, str(ROOT / "tools" / "omr"))
 
 import repair  # noqa: E402
 import score  # noqa: E402
-from musicxml_maker import (bar, four_crotchets, part,  # noqa: E402
+from musicxml_maker import (attributes, bar, four_crotchets, part,  # noqa: E402
                             score as make_score, write_mxl)
 
 
@@ -149,6 +149,46 @@ def test_range_check_names_the_bars():
     assert score.below_range(first, "Violin II") == ["2"]
     assert score.below_range(second, "Marimba") == []       # not range-checked
     assert score.lowest_written("Contrabass") == 40 and score.lowest_written("Violoncello") == 36
+
+
+OBOE_RIFF = [("C4", 0.5), ("E4", 0.5), ("G4", 0.5), ("C5", 0.5), ("r", 0.5), ("C5", 0.5), ("r", 0.5), ("E4", 0.5)]
+# The same figure a fifth up (the helper writes naturals only), first rest dropped.
+TRUMPET_SHORT = [("G4", 0.5), ("B4", 0.5), ("D5", 0.5), ("G5", 0.5), ("G5", 0.5), ("r", 0.5), ("B4", 0.5)]
+
+
+def _events(part_element):
+    out = []
+    for n in part_element.iter("note"):
+        out.append("r" if n.find("rest") is not None else n.findtext("pitch/step") + n.findtext("pitch/octave"))
+    return out
+
+
+def test_a_short_bar_gets_the_rests_of_a_matching_bar_in_another_part():
+    root = build([("P1", "Oboe", part("P1", [bar(OBOE_RIFF, 1, attributes())])),
+                  ("P2", "Trumpet", part("P2", [bar(TRUMPET_SHORT, 1, attributes())]))])
+    fixed = repair.borrow_rests(root)
+    assert fixed == ["Trumpet bar 1: 1 rest(s) put back, as in Oboe bar 1"]
+    trumpet = root.findall("part")[1]
+    assert _events(trumpet) == ["G4", "B4", "D5", "G5", "r", "G5", "r", "B4"]
+    assert score.bad_bars(trumpet) == []
+    added = [n for n in trumpet.iter("note") if n.find("rest") is not None][0]
+    assert [c.tag for c in added] == ["rest", "duration", "voice", "type"] and added.findtext("type") == "eighth"
+
+
+def test_no_rests_are_borrowed_when_the_notes_differ():
+    other = [("G4", 0.5), ("C5", 0.5), ("D5", 0.5), ("G5", 0.5), ("G5", 0.5), ("r", 0.5), ("B4", 0.5)]
+    root = build([("P1", "Oboe", part("P1", [bar(OBOE_RIFF, 1, attributes())])),
+                  ("P2", "Trumpet", part("P2", [bar(other, 1, attributes())]))])
+    assert repair.borrow_rests(root) == []
+
+
+def test_no_rests_are_borrowed_when_matching_bars_disagree_where():
+    # Same notes as the oboe's, rests in different places: which to copy is unknown.
+    elsewhere = [("C4", 0.5), ("r", 0.5), ("E4", 0.5), ("G4", 0.5), ("C5", 0.5), ("C5", 0.5), ("r", 0.5), ("E4", 0.5)]
+    root = build([("P1", "Oboe", part("P1", [bar(OBOE_RIFF, 1, attributes()), bar(elsewhere, 2)])),
+                  ("P2", "Trumpet", part("P2", [bar(TRUMPET_SHORT, 1, attributes())]))])
+    assert repair.borrow_rests(root) == []
+    assert _events(root.findall("part")[1]).count("r") == 1
 
 
 @pytest.mark.parametrize("config", [{"transpose": {"Nobody": "Bb"}}, {"transpose": {"Flute": "H"}},
