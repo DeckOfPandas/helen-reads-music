@@ -14,7 +14,9 @@ check   Per part: bars, notes, rests, octave range, whether it carries a
         Audiveris can miss a time signature altogether. A bar with none in
         force is judged against --time (read it off the printed page); with
         no --time it is reported NOT CHECKED, never passed.
-names   Every part name, in score order: the raw material for a merge config.
+        Also every bar with a note below the instrument's lowest written
+        note (by its part name): usually a stave read an octave low.
+names  Every part name, in score order: the raw material for a merge config.
 
 This reads structure, not notation: it says where to look, it is not a
 proofread.
@@ -197,6 +199,48 @@ def judge(part: ET.Element, assume: Fraction | None = None) -> tuple[list[BadBar
     return bad, unjudged
 
 
+# --- written range --------------------------------------------------------------
+
+# Lowest written note, as a MIDI number, by a word in the part name: the
+# first word that matches wins, so "contrabass" is tried before "bass".
+# An instrument not named here is not range-checked.
+LOWEST_WRITTEN = (
+    ("piccolo", 62), ("flute", 60), ("oboe", 58), ("clarinet", 52), ("bassoon", 34),
+    ("horn", 42), ("trumpet", 54), ("trombone", 40), ("violin", 55), ("viola", 48),
+    ("violoncello", 36), ("cello", 36), ("contrabass", 40), ("double bass", 40), ("bass", 40),
+)
+STEPS = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
+
+
+def midi(note: ET.Element) -> int | None:
+    pitch = note.find("pitch")
+    if pitch is None:
+        return None
+    alter = Fraction(pitch.findtext("alter") or 0)
+    return 12 * (int(pitch.findtext("octave")) + 1) + STEPS[pitch.findtext("step")] + int(alter)
+
+
+def lowest_written(name: str) -> int | None:
+    lowered = name.lower()
+    for word, lowest in LOWEST_WRITTEN:
+        if word in lowered:
+            return lowest
+    return None
+
+
+def below_range(part: ET.Element, name: str) -> list[str]:
+    """Bar numbers holding a note below the instrument's lowest written note:
+    usually a whole stave read an octave low (a clef misread as "8 below")."""
+    lowest = lowest_written(name)
+    if lowest is None:
+        return []
+    bars = []
+    for measure in part.findall("measure"):
+        if any((m := midi(n)) is not None and m < lowest for n in measure.iter("note")):
+            bars.append(measure.get("number") or "?")
+    return bars
+
+
 # --- the check ------------------------------------------------------------------
 
 def check(path: Path | str, assume: Fraction | None = None) -> list[str]:
@@ -245,6 +289,10 @@ def check(path: Path | str, assume: Fraction | None = None) -> list[str]:
             lines.append(f"    {bar.describe()}")
         if unjudged:
             lines.append(f"    {unjudged} bar(s) NOT CHECKED: no time signature or divisions")
+        low = below_range(part, names.get(pid, ""))
+        if low:
+            lines.append(f"    BELOW THE INSTRUMENT'S RANGE in bar(s) {', '.join(low)}: "
+                         "probably read an octave low")
     if counts and len(set(counts)) > 1:
         lines.append(f"WARNING: parts have different bar counts: {counts}")
     total = f"bars that do not add up: {total_bad} of {sum(counts) - total_unjudged} checked"

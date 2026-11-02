@@ -21,6 +21,13 @@ process.py runs these after the merge. The optional keys in merge.json:
       Audiveris often stamps the concert key onto every staff, even one
       printed with no key signature.
 
+  "octave_clefs": false
+      The score is printed with no octave clefs (no small 8 above or below a
+      clef). Audiveris can read a plain treble clef as "8 below" and put the
+      whole stave an octave low; this removes every clef-octave-change and
+      moves the notes it governed back. score.py check flags such staves as
+      below the instrument's range.
+
 Always, when "time" is known (from the score or merge.json):
   A bar holding nothing but whole-bar rests (<rest measure="yes">) takes
   its length from the time signature. Audiveris gives such a rest the bar
@@ -164,6 +171,37 @@ def fill_rest_bars(part: ET.Element) -> tuple[int, int]:
     return resized, added
 
 
+def fix_octave_clefs(part: ET.Element) -> tuple[int, int]:
+    """Strip every clef-octave-change and move the notes it governed back.
+    (clefs fixed, notes moved). For a score printed with no octave clefs:
+    Audiveris sometimes reads a plain treble clef as "8 below"."""
+    shift: dict[str, int] = {}
+    clefs = moved = 0
+    for measure in part.findall("measure"):
+        for element in measure:
+            if element.tag == "attributes":
+                for clef in element.findall("clef"):
+                    staff = clef.get("number", "1")
+                    change = clef.find("clef-octave-change")
+                    if change is None:
+                        shift[staff] = 0
+                        continue
+                    shift[staff] = -int(change.text or 0)
+                    clef.remove(change)
+                    clefs += 1
+            elif element.tag == "note":
+                by = shift.get(element.findtext("staff") or "1", 0)
+                if not by:
+                    continue
+                octave = element.find("pitch/octave")
+                if octave is None:
+                    octave = element.find("rest/display-octave")
+                if octave is not None:
+                    octave.text = str(int(octave.text) + by)
+                    moved += element.find("pitch") is not None
+    return clefs, moved
+
+
 def concert_fifths(root: ET.Element, transposing: set[str]) -> int | None:
     counts = Counter()
     for part in root.findall("part"):
@@ -201,6 +239,14 @@ def repair(root: ET.Element, config: dict) -> list[str]:
     names = dict(score.part_names(root))
     by_name = {name: pid for pid, name in names.items()}
     parts = {p.get("id"): p for p in root.findall("part")}
+
+    if config.get("octave_clefs") is False:
+        fixed = moved = 0
+        for part in parts.values():
+            c, m = fix_octave_clefs(part)
+            fixed += c
+            moved += m
+        report.append(f"octave clefs: {fixed} '8 below/above' marking(s) removed, {moved} note(s) moved back")
 
     time = config.get("time")
     if time:

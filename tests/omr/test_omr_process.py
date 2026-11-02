@@ -24,20 +24,32 @@ FRAGMENTS = make_score([
 
 
 class FakeAudiveris:
-    """Records each call; writes FRAGMENTS as <pdf stem>.mxl unless told to
-    fail with a log line first."""
+    """Records each call; writes FRAGMENTS (or `sharp_xml` for a re-rendered
+    PDF) as <pdf stem>.mxl, unless told to fail with a log line first or the
+    PDF's DPI is in `crash_at`. With `interline`, logs it the way Audiveris does."""
 
-    def __init__(self, fail_with: list[str] | None = None):
+    def __init__(self, fail_with: list[str] | None = None, interline: int | None = None,
+                 crash_at: tuple = (), sharp_xml: str | None = None):
         self.fail_with = list(fail_with or [])
+        self.interline = interline
+        self.crash_at = {str(d) for d in crash_at}
+        self.sharp_xml = sharp_xml
         self.calls: list[list[str]] = []
 
     def __call__(self, args, log=None):
         self.calls.append(args)
         out, pdf = Path(args[args.index("-output") + 1]), Path(args[-1])
+        if self.interline:
+            log.write(f"INFO ScaleStep 65 | Scale{{ interline({self.interline},{self.interline},13) line(2,2,2) beam(7)}}\n")
         if self.fail_with:
             log.write(self.fail_with.pop(0) + "\n")
             return 0
-        write_mxl(out / f"{pdf.stem}.mxl", FRAGMENTS)
+        dpi = pdf.stem.rsplit("-", 1)[-1]
+        if dpi in self.crash_at:
+            log.write("java.lang.NullPointerException\n")
+            return 1
+        sharp = dpi.isdigit()
+        write_mxl(out / f"{pdf.stem}.mxl", self.sharp_xml if sharp and self.sharp_xml else FRAGMENTS)
         return 0
 
 
@@ -157,6 +169,66 @@ def test_a_folder_of_pdfs_and_images_is_refused(tmp_path):
     fake = FakeAudiveris()
     ok, notes = process.process(piece, run=fake)
     assert not ok and "both PDFs and images" in notes[0] and fake.calls == []
+
+
+def test_a_sharper_read_steps_down_past_a_crash_and_becomes_primary(tmp_path):
+    piece = piece_with_pdfs(tmp_path, count=1)
+    fake = FakeAudiveris(interline=12, crash_at=(450,))
+    ok, notes = process.process(piece, run=fake)
+    assert ok, notes
+    pdfs = [Path(c[-1]).name for c in fake.calls]
+    assert pdfs == ["under-the-sea.pdf", "under-the-sea-450.pdf", "under-the-sea-425.pdf"]
+    out = piece / "omr"
+    assert (out / "sharp" / "under-the-sea.mxl").is_file()
+    assert (out / "sharp" / "audiveris-450dpi-failed.log").is_file()
+    assert any(n.startswith("at 450 DPI Audiveris failed") for n in notes)
+    assert any(n.startswith("sharper read at 425 DPI") for n in notes)
+    assert "primary read: omr/sharp/under-the-sea.mxl; second read: omr/under-the-sea.mxl" in notes
+
+
+def test_no_sharper_read_when_the_first_is_already_sharp_or_single(tmp_path):
+    piece = piece_with_pdfs(tmp_path, count=1)
+    fake = FakeAudiveris(interline=19)
+    process.process(piece, run=fake)
+    assert len(fake.calls) == 1
+    other = piece_with_pdfs(tmp_path, name="other", count=1)
+    fake = FakeAudiveris(interline=12)
+    process.process(other, run=fake, sharp=False)
+    assert len(fake.calls) == 1
+
+
+def test_the_second_read_fills_the_primarys_bad_bars(tmp_path):
+    # Primary (sharp) misses a crotchet in Flute bar 2; the 300 DPI read has it.
+    sharp_xml = FRAGMENTS
+    full = make_score([
+        ("P1", "Fl.", part("P1", [bar(four_crotchets(), 1, attributes()), bar(whole_rest(), 2)])),
+        ("P2", "Flute", part("P2", [bar(whole_rest(), 1, attributes()), bar([("D5", 1)] * 4, 2)])),
+    ])
+    piece = piece_with_pdfs(tmp_path, count=1)
+    (piece / "merge.json").write_text(json.dumps(
+        {"canonical_order": ["Flute"], "aliases": {"Fl.": "Flute", "Flute": "Flute"}}))
+
+    class TwoReads(FakeAudiveris):
+        def __call__(self, args, log=None):
+            code = super().__call__(args, log)
+            out, pdf = Path(args[args.index("-output") + 1]), Path(args[-1])
+            if not pdf.stem.rsplit("-", 1)[-1].isdigit():
+                write_mxl(out / f"{pdf.stem}.mxl", full)      # the 300 DPI read
+            return code
+
+    ok, notes = process.process(piece, run=TwoReads(interline=12, sharp_xml=sharp_xml))
+    assert ok, notes
+    report = (piece / "omr" / "merge-report.txt").read_text()
+    assert "bars taken from the second read: 1" in report
+    merged = score.load(piece / "omr" / "under-the-sea-merged.mxl")
+    assert score.bad_bars(merged.find("part")) == []
+
+
+def test_interline_reads_the_smallest_sheet(tmp_path):
+    log = tmp_path / "a.log"
+    log.write_text("Scale{ interline(12,13,13) x}\nScale{ interline(11,12,12) x}\n")
+    assert process.interline(log) == 12
+    assert process.interline(tmp_path / "none.log") is None
 
 
 @pytest.mark.parametrize("found,dpi", [

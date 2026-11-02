@@ -11,8 +11,21 @@ A piece is a folder in library/. What is in it decides what is read:
                       each split into two pages first (pages.py split)
 A folder holding both PDFs and images is refused: split it.
 
+Each piece is read twice. First at 300 DPI; then, from the staff-line spacing
+(interline) Audiveris measured, again at the DPI that brings it to about 18 px,
+stepping down (17, 16, 15) while Audiveris fails at a resolution. At 300 DPI a
+dense score reads at about 12 px, where Audiveris drops small symbols, the
+time signature among them, and with no time signature it cannot correct its
+rhythms. The sharper read is the primary: names.txt, the report and
+merge.json are about it. After the merge, its bars that do not add up are
+taken from the 300 DPI read where that one's add up (combine.py).
+--single skips the sharper read.
+
 Everything made goes in library/<piece>/omr/:
-  <piece>.mxl                   what Audiveris read
+  sharp/<piece>.mxl             the sharper read (the primary, when it worked)
+  sharp/audiveris.log           its log; audiveris-<dpi>dpi-failed.log for each
+                                resolution Audiveris failed at
+  <piece>.mxl                   the 300 DPI read
   <piece>.omr                   Audiveris's own book, to open in its editor
   report.txt                    score.py check: parts, and bars that do not add up
   names.txt                     every part name Audiveris gave
@@ -21,7 +34,8 @@ Everything made goes in library/<piece>/omr/:
                                 then repaired (repair.py: time signature,
                                 transposition, whole-bar rests)
   merge-report.txt              what the merge and repairs did, or why the merge
-                                refused, and the check of the result
+                                refused; how the second read was matched and
+                                which bars came from it; the check of the result
   audiveris.log                 the full Audiveris log
   work/                         the PDF handed to Audiveris
 
@@ -42,12 +56,19 @@ import sys
 from pathlib import Path
 
 import audiveris
+import combine
 import merge
 import pages
 import repair
 import score
 
 OUT = "omr"
+SHARP = "sharp"
+# Staff-line spacing, in pixels, the sharper read aims for, in the order
+# tried. Audiveris trusts a sheet from about 11 px; at 12 it drops small
+# symbols (quaver rests, time signatures). Some page geometries crash it at
+# one resolution and not another, hence a ladder rather than one target.
+SHARP_TARGETS = (18, 17, 16, 15)
 
 
 def slug(name: str) -> str:
@@ -108,24 +129,66 @@ def read_with_audiveris(pdf: Path, out: Path, log: Path, run=audiveris.run) -> l
     return sorted(out.glob(f"{pdf.stem}*.mxl"))
 
 
+def interline(log: Path) -> int | None:
+    """The smallest typical staff-line spacing Audiveris measured on any sheet."""
+    text = log.read_text(errors="replace") if log.is_file() else ""
+    found = [int(m) for m in re.findall(r"Scale\{ interline\(\d+,(\d+),\d+\)", text)]
+    return min(found) if found else None
+
+
+def sharp_read(pdf: Path, out: Path, measured: int, read_dpi: int, name: str,
+               run=audiveris.run) -> tuple[Path | None, list[str]]:
+    """Read again at the DPI that puts the interline at SHARP_TARGETS, trying
+    each in turn until Audiveris succeeds. (score or None, notes)."""
+    sharp = out / SHARP
+    sharp.mkdir(exist_ok=True)
+    notes = []
+    tried = set()
+    for target in SHARP_TARGETS:
+        dpi = round(read_dpi * target / measured)
+        if dpi < read_dpi * 1.1:
+            notes.append(f"interline already {measured} px; no sharper read needed")
+            return None, notes
+        render = out / "work" / f"{name}-{dpi}.pdf"
+        rendered = pages.rerender(pdf, render, dpi)
+        size = tuple(line.split(" at ")[0] for line in rendered)
+        if size in tried:                       # capped to a size already tried
+            continue
+        tried.add(size)
+        made = read_with_audiveris(render, sharp, sharp / "audiveris.log", run)
+        if made:
+            target_mxl = sharp / f"{name}.mxl"
+            made[0].rename(target_mxl)
+            notes.append(f"sharper read at {dpi} DPI (aiming for {target} px interline): {SHARP}/{name}.mxl")
+            return target_mxl, notes
+        failed_log = sharp / f"audiveris-{dpi}dpi-failed.log"
+        (sharp / "audiveris.log").rename(failed_log)
+        notes.append(f"at {dpi} DPI Audiveris failed; log kept as {SHARP}/{failed_log.name}")
+    return None, notes
+
+
 def process(piece: Path, force: bool = False, run=audiveris.run,
-            assume_time=None) -> tuple[bool, list[str]]:
+            assume_time=None, sharp: bool = True) -> tuple[bool, list[str]]:
     name = slug(piece.name)
     out = piece / OUT
     out.mkdir(exist_ok=True)
     mxl = out / f"{name}.mxl"
     log = out / "audiveris.log"
+    sharp_mxl = out / SHARP / f"{name}.mxl"
     notes: list[str] = []
 
     if mxl.exists() and not force:
         notes.append("already read (--force to read again)")
     else:
+        if sharp_mxl.exists():
+            sharp_mxl.unlink()
         work = out / "work"
         pdf = work / f"{name}.pdf"
         try:
             build_pdf(piece, work, pdf)
         except ValueError as err:
             return False, [f"could not make a PDF: {err}"]
+        read_dpi = 300
         made = read_with_audiveris(pdf, out, log, run)
         if not made:
             dpi = fix_dpi(diagnose(log))
@@ -133,6 +196,7 @@ def process(piece: Path, force: bool = False, run=audiveris.run,
                 notes.append(f"Audiveris refused the resolution; re-rendering at up to {dpi} DPI")
                 fixed = work / f"{name}-fixed.pdf"
                 notes.extend(pages.rerender(pdf, fixed, dpi))
+                read_dpi = dpi
                 made = read_with_audiveris(fixed, out, log, run)
                 for path in made:
                     path.rename(out / path.name.replace(f"{name}-fixed", name))
@@ -144,11 +208,23 @@ def process(piece: Path, force: bool = False, run=audiveris.run,
             notes.append(f"Audiveris split the book into {len(made)} movements: "
                          f"{[p.name for p in made]}; the report covers the first")
             mxl = made[0]
+        measured = interline(log)
+        if sharp and measured:
+            _, sharp_notes = sharp_read(pdf, out, measured, read_dpi, name, run)
+            notes.extend(sharp_notes)
+        elif sharp:
+            notes.append("no interline in the Audiveris log; no sharper read")
+
+    # The sharper read, when there is one, is the one the table is written for.
+    primary, second = (sharp_mxl, mxl) if sharp_mxl.exists() else (mxl, None)
+    if second:
+        notes.append(f"primary read: {primary.relative_to(piece)}; second read: {second.relative_to(piece)}")
 
     config = piece / "merge.json"
     table = json.loads(config.read_text(encoding="utf-8")) if config.is_file() else {}
     if assume_time is None and table.get("time"):
         assume_time = score.parse_time(table["time"])
+    mxl = primary
     report = score.check(mxl, assume_time)
     (out / "report.txt").write_text("\n".join(report) + "\n", encoding="utf-8")
     names = score.part_names(score.load(mxl))
@@ -174,6 +250,8 @@ def process(piece: Path, force: bool = False, run=audiveris.run,
                 merge_report += ["", "repairs:", *repair.repair(root, table)]
             except ValueError as err:
                 return False, notes + [f"merge.json: {err}"]
+            if second is not None:
+                merge_report += ["", *second_opinion(root, second, table, assume_time)]
             score.save(root, merged, like=merged)
             check = score.check(merged, assume_time)
             merge_report += ["", *check]
@@ -184,6 +262,25 @@ def process(piece: Path, force: bool = False, run=audiveris.run,
     return True, notes
 
 
+def second_opinion(primary: score.ET.Element, second: Path, table: dict, assume_time) -> list[str]:
+    """Merge and repair the second read to match `primary`, then fill
+    `primary`'s bad bars from it (combine.py). Report lines."""
+    raw = score.load(second)
+    mapping, report = combine.align(raw, primary, table.get("aliases", {}))
+    report.insert(0, "second read, matched to the merged instruments:")
+    order = [name for _, name in score.part_names(primary)]
+    ok, merge_lines = merge.merge(raw, order, mapping)
+    if not ok:
+        return report + ["second read not used: its merge did not conserve notes", *merge_lines]
+    present = {name for _, name in score.part_names(raw)}
+    settings = {**table, "transpose": {n: k for n, k in (table.get("transpose") or {}).items() if n in present}}
+    try:
+        repair.repair(raw, settings)
+    except ValueError as err:
+        return report + [f"second read not used: {err}"]
+    return report + ["", *combine.fill(primary, raw, assume_time)]
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -191,6 +288,8 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--force", action="store_true", help="read with Audiveris again")
     parser.add_argument("--time", type=score.parse_time, metavar="N/N",
                         help="time signature off the printed page, for bars Audiveris gave none")
+    parser.add_argument("--single", action="store_true",
+                        help="read once at 300 DPI: no sharper second read")
     args = parser.parse_args(argv)
 
     failed = False
@@ -200,7 +299,7 @@ def main(argv: list[str]) -> int:
             failed = True
             continue
         print(f"== {piece}", flush=True)
-        ok, notes = process(piece, args.force, assume_time=args.time)
+        ok, notes = process(piece, args.force, assume_time=args.time, sharp=not args.single)
         for note in notes:
             print(f"   {note}", flush=True)
         print(f"   {'done' if ok else 'FAILED'}: {piece / OUT}", flush=True)

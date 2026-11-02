@@ -113,6 +113,44 @@ def test_a_key_already_written_is_not_moved_twice():
     assert root.findall("part")[1].findtext("measure/attributes/key/fifths") == "-1"
 
 
+def octave_low(clef_octave: str = "<clef-octave-change>-1</clef-octave-change>") -> str:
+    return ("<attributes><divisions>4</divisions><key><fifths>0</fifths></key>"
+            "<time><beats>4</beats><beat-type>4</beat-type></time>"
+            f"<clef><sign>G</sign><line>2</line>{clef_octave}</clef></attributes>")
+
+
+def test_a_false_octave_clef_is_removed_and_its_notes_moved_back():
+    # The oboe's opening D4 read as D3 under a "treble 8 below" clef.
+    plain_clef = "<attributes><clef><sign>G</sign><line>2</line></clef></attributes>"
+    bars = [bar([("D3", 1), ("F3", 1), ("r", 2)], 1, octave_low()),
+            bar(four_crotchets("D3"), 2),
+            bar(four_crotchets("D4"), 3, plain_clef)]
+    root = build([("P1", "Oboe", part("P1", bars))])
+    assert score.below_range(root.find("part"), "Oboe") == ["1", "2"]
+    report = repair.repair(root, {"octave_clefs": False})
+    # Bars 1-2 move (2 + 4 notes); bar 3's plain clef ends the shift.
+    assert report[0] == "octave clefs: 1 '8 below/above' marking(s) removed, 6 note(s) moved back"
+    octaves = [n.findtext("pitch/octave") for n in root.iter("note") if n.find("pitch") is not None]
+    assert octaves == ["4", "4"] + ["4"] * 4 + ["4"] * 4
+    assert root.find(".//clef-octave-change") is None
+    assert score.below_range(root.find("part"), "Oboe") == []
+
+
+def test_octave_clefs_are_kept_unless_the_table_says_there_are_none():
+    root = build([("P1", "Tenor", part("P1", [bar(four_crotchets("D3"), 1, octave_low())]))])
+    repair.repair(root, {})
+    assert root.find(".//clef-octave-change") is not None
+
+
+def test_range_check_names_the_bars():
+    bars = [bar(four_crotchets("G3"), 1, octave_low("")), bar(four_crotchets("F3"), 2)]
+    root = build([("P1", "Violin II", part("P1", bars)), ("P2", "Marimba", part("P2", bars))])
+    first, second = root.findall("part")
+    assert score.below_range(first, "Violin II") == ["2"]
+    assert score.below_range(second, "Marimba") == []       # not range-checked
+    assert score.lowest_written("Contrabass") == 40 and score.lowest_written("Violoncello") == 36
+
+
 @pytest.mark.parametrize("config", [{"transpose": {"Nobody": "Bb"}}, {"transpose": {"Flute": "H"}},
                                     {"time": "four"}])
 def test_bad_config_is_refused(config):
