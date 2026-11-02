@@ -17,8 +17,11 @@ Everything made goes in library/<piece>/omr/:
   report.txt                    score.py check: parts, and bars that do not add up
   names.txt                     every part name Audiveris gave
   merge.template.json           a table to fill in (see merge.py)
-  <piece>-merged.mxl            once library/<piece>/merge.json exists
-  merge-report.txt              what the merge did, or why it refused
+  <piece>-merged.mxl            once library/<piece>/merge.json exists: merged,
+                                then repaired (repair.py: time signature,
+                                transposition, whole-bar rests)
+  merge-report.txt              what the merge and repairs did, or why the merge
+                                refused, and the check of the result
   audiveris.log                 the full Audiveris log
   work/                         the PDF handed to Audiveris
 
@@ -41,6 +44,7 @@ from pathlib import Path
 import audiveris
 import merge
 import pages
+import repair
 import score
 
 OUT = "omr"
@@ -147,7 +151,9 @@ def process(piece: Path, force: bool = False, run=audiveris.run,
     (out / "names.txt").write_text("".join(f"{pid} | {n}\n" for pid, n in names), encoding="utf-8")
     template = {
         "_help": ("List the real instruments in score order in canonical_order, and set each "
-                  "name in aliases to one of them (null leaves it its own part). Save as "
+                  "name in aliases to one of them (null leaves it its own part). Where one "
+                  "name covers different staves (often 'Voice'), add keys by part id from "
+                  "names.txt, e.g. \"P23\": \"Marimba\"; an id wins over its name. Save as "
                   f"library/{piece.name}/merge.json and run process.py again."),
         "canonical_order": [],
         "aliases": {n: None for _, n in names},
@@ -157,12 +163,21 @@ def process(piece: Path, force: bool = False, run=audiveris.run,
 
     config = piece / "merge.json"
     if config.is_file():
+        table = json.loads(config.read_text(encoding="utf-8"))
+        if assume_time is None and table.get("time"):
+            assume_time = score.parse_time(table["time"])
         merged = out / f"{name}-merged.mxl"
         ok, merge_report = merge.merge_file(mxl, merged, config)
         if ok:
+            root = score.load(merged)
+            try:
+                merge_report += ["", "repairs:", *repair.repair(root, table)]
+            except ValueError as err:
+                return False, notes + [f"merge.json: {err}"]
+            score.save(root, merged, like=merged)
             check = score.check(merged, assume_time)
             merge_report += ["", *check]
-            notes.append(f"merged with merge.json -> {merged.name}; {check[-1]}")
+            notes.append(f"merged and repaired with merge.json -> {merged.name}; {check[-1]}")
         else:
             notes.append("merge REFUSED: it would have lost notes; see merge-report.txt")
         (out / "merge-report.txt").write_text("\n".join(merge_report) + "\n", encoding="utf-8")

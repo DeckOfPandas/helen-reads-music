@@ -83,6 +83,18 @@ def test_a_conflict_refuses_and_says_where():
     assert "MISMATCH" in report[-1]
 
 
+def test_a_part_id_overrides_its_shared_name():
+    # Two different staves both read as "Voice": the ids tell them apart.
+    marimba = part("P1", [bar(four_crotchets("D4"), 1, attributes()), bar(whole_rest(), 2)])
+    voice = part("P2", [bar(whole_rest(), 1, attributes()), bar(whole_rest(), 2)])
+    marimba2 = part("P3", [bar(whole_rest(), 1, attributes()), bar(four_crotchets("F4"), 2)])
+    root = ET.fromstring(make_score([("P1", "Voice", marimba), ("P2", "Voice", voice), ("P3", "Mar.", marimba2)]))
+    ok, report = merge.merge(root, ["Marimba", "Voice"], {"P1": "Marimba", "Mar.": "Marimba", "Voice": "Voice"})
+    assert ok, report
+    assert [name for _, name in score.part_names(root)] == ["Marimba", "Voice"]
+    assert _pitches(root.findall("part")[0]) == ["D4"] * 4 + ["F4"] * 4
+
+
 def test_names_not_in_the_table_stay_as_they_were():
     root = fragmented()
     ok, report = merge.merge(root, ["Flute"], {"Fl.": "Flute", "Flute": "Flute", "Ob.": None})

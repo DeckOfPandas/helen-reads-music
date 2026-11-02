@@ -112,7 +112,29 @@ def test_merge_json_is_applied_and_checked(tmp_path):
     merged = piece / "omr" / "under-the-sea-merged.mxl"
     assert [n for _, n in score.part_names(score.load(merged))] == ["Flute"]
     assert "conserved" in (piece / "omr" / "merge-report.txt").read_text()
-    assert any("merged with merge.json" in n for n in notes)
+    assert any("merged and repaired with merge.json" in n for n in notes)
+
+
+def test_merge_json_time_and_transposition_are_applied(tmp_path):
+    piece = piece_with_pdfs(tmp_path, count=1)
+    (piece / "merge.json").write_text(json.dumps({
+        "canonical_order": ["Flute"], "aliases": {"Fl.": "Flute", "Flute": "Flute"},
+        "time": "4/4", "transpose": {"Flute": "8va"}}))
+    ok, notes = process.process(piece, run=FakeAudiveris())
+    assert ok, notes
+    root = score.load(piece / "omr" / "under-the-sea-merged.mxl")
+    assert root.find("part/measure/attributes/transpose/octave-change").text == "1"
+    report = (piece / "omr" / "merge-report.txt").read_text()
+    assert "Flute: transposing in 8va" in report
+
+
+def test_a_bad_transpose_entry_fails_the_piece(tmp_path):
+    piece = piece_with_pdfs(tmp_path, count=1)
+    (piece / "merge.json").write_text(json.dumps({
+        "canonical_order": ["Flute"], "aliases": {"Fl.": "Flute", "Flute": "Flute"},
+        "transpose": {"Flute": "Bb-ish"}}))
+    ok, notes = process.process(piece, run=FakeAudiveris())
+    assert not ok and "Bb-ish" in notes[-1]
 
 
 def test_images_become_one_pdf_and_spreads_are_split(tmp_path):

@@ -17,7 +17,9 @@ Config (score.py names lists the raw names):
   "aliases": {"Fl.": "Flute", "F1.": "Flute", "Flute": "Flute", "Ob.": "Oboe"}
 }
 A name not in aliases, or mapped to null, stays its own part; nothing is
-dropped.
+dropped. A key may also be a part id from names.txt ("P23": "Marimba"): an
+id wins over its name, for the names Audiveris gives to several different
+staves (an unread name comes out as "Voice").
 
 Rules:
 - Each bar of an instrument comes from the one fragment with notes in it.
@@ -127,7 +129,7 @@ def merge(root: ET.Element, canonical_order: list[str],
     groups: dict[str, list[str]] = {c: [] for c in canonical_order}
     unmatched = []
     for pid, name in names:
-        canon = aliases.get(name)
+        canon = aliases[pid] if pid in aliases else aliases.get(name)
         (groups[canon] if canon else unmatched).append(pid)
 
     notes_in = sum(score.count_part_notes(p) for p in parts.values())
