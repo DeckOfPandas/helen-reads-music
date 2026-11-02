@@ -61,6 +61,11 @@ is the only enforcement.
   `chmod`, `chown` or `sudo`. A yes to one is not a yes to the next.
   `.claude/settings.json` denies all three.
 - NEVER read or create `.env` files or `.claude/settings.local.json`.
+- **Music never reaches git.** Every score, and everything made from one
+  (MusicXML, `.mxl`, `.omr`, merge configs, reports), lives in the gitignored
+  `library/<piece>/`, never in `tmp/` and never anywhere tracked. The scores
+  are licensed to me; a push publishes them. Tests use public-domain or
+  generated music, made at run time. `guard-music-in-git.py` enforces it.
 - NEVER alter shell dotfiles or system configuration.
 
 ## Git workflow

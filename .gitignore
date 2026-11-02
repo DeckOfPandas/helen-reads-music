@@ -7,3 +7,11 @@ __pycache__/
 .claude/worktrees/
 scripts/github.local.conf
 .devcontainer/kit.local.env
+
+# Music is licensed, never published: scores and everything made from them
+# live in library/. The patterns are case-blind because git on Linux is not.
+library/
+*.[pP][dD][fF]
+*.[mM][xX][lL]
+*.[mM][uU][sS][iI][cC][xX][mM][lL]
+*.[oO][mM][rR]

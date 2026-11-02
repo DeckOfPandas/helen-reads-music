@@ -98,6 +98,12 @@
           },
           {
             "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard-music-in-git.py\"",
+            "timeout": 20,
+            "statusMessage": "Checking no music is staged"
+          },
+          {
+            "type": "command",
             "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard-token-expansion.py\"",
             "timeout": 20,
             "statusMessage": "Checking for token exposure"
