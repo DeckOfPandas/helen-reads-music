@@ -15,7 +15,7 @@ def _rules(kind: str) -> list[str]:
     return rules
 
 
-# Every allow rule that ends in ` *`, and so accepts any further arguments.
+# Every allow rule that ends in `*`, and so accepts any further arguments.
 # Before one goes in, check the tool for an option that runs a program
 # (`git fetch --upload-pack=`, `git clone --template=`, `node --import` are
 # why those are not here) and for one that writes a file anywhere
@@ -63,11 +63,16 @@ REVIEWED_OPEN_RULES = {
     "Bash(node tools/dev/slice-png.js *)",
     "Bash(node tools/dev/crop.js *)",
     "Bash(node tools/dev/styles.js *)",
+    # ls has no option that runs a program or writes a file. The wildcard
+    # also accepts a second path or `..`, so these list names anywhere the
+    # container user can see; they never read a file's contents.
+    "Bash(ls /opt/*)",
+    "Bash(ls -la /opt/*)",
 }
 
 
 def test_every_open_ended_allow_rule_has_been_reviewed():
-    open_rules = {rule for rule in _rules("allow") if rule.endswith(" *)")}
+    open_rules = {rule for rule in _rules("allow") if rule.endswith("*)")}
     assert open_rules, "found no open-ended allow rules at all -- parsing broke?"
     unreviewed = sorted(open_rules - REVIEWED_OPEN_RULES)
     assert not unreviewed, (
