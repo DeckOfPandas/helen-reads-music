@@ -1,4 +1,4 @@
-# Claude Code Rules for <PROJECT>
+# Claude Code Rules for Helen Reads Music
 
 **This file is the RULES.** It loads into every session, so keep it short. Where
 a rule names a hook, the hook enforces it. Where it names none, this paragraph
