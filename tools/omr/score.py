@@ -2,7 +2,7 @@
 """Read, check and write MusicXML (.mxl or .musicxml/.xml).
 
 USAGE (from the repo root):
-    python3 tools/omr/score.py check <score.mxl> [<score.mxl> ...]
+    python3 tools/omr/score.py check <score.mxl> [<score.mxl> ...] [--time 4/4]
     python3 tools/omr/score.py names <score.mxl>
 
 check   Per part: bars, notes, rests, octave range, whether it carries a
@@ -11,6 +11,9 @@ check   Per part: bars, notes, rests, octave range, whether it carries a
         bars are where Audiveris dropped or invented a note or rest; the
         report gives the bar number, what it holds and what it should.
         A pickup bar (implicit="yes") is allowed to be short.
+        Audiveris can miss a time signature altogether. A bar with none in
+        force is judged against --time (read it off the printed page); with
+        no --time it is reported NOT CHECKED, never passed.
 names   Every part name, in score order: the raw material for a merge config.
 
 This reads structure, not notation: it says where to look, it is not a
@@ -139,10 +142,26 @@ def _time_signature(attributes: ET.Element) -> Fraction | None:
     return Fraction(4 * beats, beat_type)
 
 
-def bad_bars(part: ET.Element) -> list[BadBar]:
+def parse_time(text: str) -> Fraction:
+    """"4/4" or "6/8" as crotchets per bar."""
+    beats, _, beat_type = text.partition("/")
+    if not (beats.isdigit() and beat_type.isdigit() and int(beats) and int(beat_type)):
+        raise ValueError(f"not a time signature: {text!r}")
+    return Fraction(4 * int(beats), int(beat_type))
+
+
+def bad_bars(part: ET.Element, assume: Fraction | None = None) -> list[BadBar]:
     """Bars whose content does not fill the time signature exactly."""
+    return judge(part, assume)[0]
+
+
+def judge(part: ET.Element, assume: Fraction | None = None) -> tuple[list[BadBar], int]:
+    """(bars that do not add up, count of bars that could not be judged).
+    A bar is judged against the time signature in force, else `assume`.
+    Without either it cannot be judged, and is counted, never passed."""
     divisions = None
-    expected = None
+    expected = assume
+    unjudged = 0
     bad = []
     for measure in part.findall("measure"):
         cursor = longest = Fraction(0)
@@ -168,24 +187,31 @@ def bad_bars(part: ET.Element) -> list[BadBar]:
                 voices[voice] = voices.get(voice, Fraction(0)) + duration
             longest = max(longest, cursor)
         if expected is None or divisions is None:
+            unjudged += 1
             continue
         if measure.get("implicit") == "yes" and longest <= expected:
             continue
         uneven = len(voices) > 1 and any(d != expected for d in voices.values())
         if longest != expected or uneven:
             bad.append(BadBar(measure.get("number") or "?", longest, expected, voices))
-    return bad
+    return bad, unjudged
 
 
 # --- the check ------------------------------------------------------------------
 
-def check(path: Path | str) -> list[str]:
+def check(path: Path | str, assume: Fraction | None = None) -> list[str]:
+    """The report. Its last line totals the bars that do not add up and,
+    if any, the bars that could not be checked."""
     root = load(path)
     names = dict(part_names(root))
     parts = root.findall("part")
     lines = [str(path), f"parts: {len(parts)}"]
+    if not any(True for _ in root.iter("time")):
+        lines.append("NO TIME SIGNATURE anywhere in this score: Audiveris did not read it"
+                     + (f"; checking against --time ({_beats(assume)} a bar)" if assume else
+                        ". Give --time (e.g. 4/4) from the printed page to check the bars."))
     counts = []
-    total_bad = 0
+    total_bad = total_unjudged = 0
     for part in parts:
         pid = part.get("id")
         measures = part.findall("measure")
@@ -212,17 +238,32 @@ def check(path: Path | str) -> list[str]:
         pitch = "transposing" if transposed else "concert pitch (no <transpose>)"
         lines.append(f"[{pid}] {names.get(pid, pid)}: {len(measures)} bars, {notes} notes, "
                      f"{rests} rests{span}, {pitch}{flag}")
-        bad = bad_bars(part)
+        bad, unjudged = judge(part, assume)
         total_bad += len(bad)
+        total_unjudged += unjudged
         for bar in bad:
             lines.append(f"    {bar.describe()}")
+        if unjudged:
+            lines.append(f"    {unjudged} bar(s) NOT CHECKED: no time signature or divisions")
     if counts and len(set(counts)) > 1:
         lines.append(f"WARNING: parts have different bar counts: {counts}")
-    lines.append(f"bars that do not add up: {total_bad}")
+    total = f"bars that do not add up: {total_bad} of {sum(counts) - total_unjudged} checked"
+    if total_unjudged:
+        total += f"; {total_unjudged} NOT CHECKED (no time signature)"
+    lines.append(total)
     return lines
 
 
 def main(argv: list[str]) -> int:
+    assume = None
+    if "--time" in argv:
+        at = argv.index("--time")
+        try:
+            assume = parse_time(argv[at + 1])
+        except (IndexError, ValueError):
+            print(__doc__, file=sys.stderr)
+            return 2
+        argv = argv[:at] + argv[at + 2:]
     if len(argv) < 2 or argv[0] not in ("check", "names"):
         print(__doc__, file=sys.stderr)
         return 2
@@ -234,7 +275,7 @@ def main(argv: list[str]) -> int:
             print(f"{pid} | {name}")
         return 0
     for path in argv[1:]:
-        print("\n".join(check(path)))
+        print("\n".join(check(path, assume)))
     return 0
 
 

@@ -75,7 +75,46 @@ def test_check_reports_bars_and_transposition(tmp_path):
     assert any("Clarinet" in l and "transposing" in l for l in lines)
     assert "    bar 2: 1 crotchet of 4 crotchets (short)" in lines
     assert "WARNING: parts have different bar counts: [2, 1]" in lines
-    assert lines[-1] == "bars that do not add up: 1"
+    assert lines[-1] == "bars that do not add up: 1 of 3 checked"
+
+
+def _untimed_attributes():
+    return "<attributes><divisions>4</divisions><clef><sign>G</sign><line>2</line></clef></attributes>"
+
+
+def test_bars_with_no_time_signature_are_counted_never_passed(tmp_path):
+    flute = part("P1", [bar([("C4", 1)] * 3, 1, _untimed_attributes()), bar(four_crotchets(), 2)])
+    root = score.ET.fromstring(make_score([("P1", "Flute", flute)]))
+    assert score.judge(root.find("part")) == ([], 2)
+    mxl = write_mxl(tmp_path / "s.mxl", make_score([("P1", "Flute", flute)]))
+    lines = score.check(mxl)
+    assert any(l.startswith("NO TIME SIGNATURE") for l in lines)
+    assert "    2 bar(s) NOT CHECKED: no time signature or divisions" in lines
+    assert lines[-1] == "bars that do not add up: 0 of 0 checked; 2 NOT CHECKED (no time signature)"
+
+
+def test_an_assumed_time_signature_checks_untimed_bars(tmp_path):
+    flute = part("P1", [bar([("C4", 1)] * 3, 1, _untimed_attributes()), bar(four_crotchets(), 2)])
+    mxl = write_mxl(tmp_path / "s.mxl", make_score([("P1", "Flute", flute)]))
+    lines = score.check(mxl, score.parse_time("4/4"))
+    assert "    bar 1: 3 crotchets of 4 crotchets (short)" in lines
+    assert lines[-1] == "bars that do not add up: 1 of 2 checked"
+
+
+def test_a_printed_time_signature_wins_over_the_assumed_one():
+    flute = part("P1", [bar([("C4", 1)] * 3, 1, attributes(time="3/4"))])
+    root = score.ET.fromstring(make_score([("P1", "Flute", flute)]))
+    assert score.judge(root.find("part"), score.parse_time("4/4")) == ([], 0)
+
+
+def test_parse_time():
+    assert score.parse_time("6/8") == Fraction(3)
+    for bad in ("4", "x/4", "0/4", "4/0"):
+        try:
+            score.parse_time(bad)
+        except ValueError:
+            continue
+        raise AssertionError(bad)
 
 
 def test_save_round_trips_and_keeps_other_members(tmp_path):

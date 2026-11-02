@@ -2,7 +2,7 @@
 """Turn a piece in library/ into MusicXML, with a report on what to check.
 
 USAGE (from the repo root):
-    python3 tools/omr/process.py library/<piece> [library/<piece> ...] [--force]
+    python3 tools/omr/process.py library/<piece> [library/<piece> ...] [--force] [--time 4/4]
 
 A piece is a folder in library/. What is in it decides what is read:
   - PDFs              merged into one, in page-number order
@@ -104,7 +104,8 @@ def read_with_audiveris(pdf: Path, out: Path, log: Path, run=audiveris.run) -> l
     return sorted(out.glob(f"{pdf.stem}*.mxl"))
 
 
-def process(piece: Path, force: bool = False, run=audiveris.run) -> tuple[bool, list[str]]:
+def process(piece: Path, force: bool = False, run=audiveris.run,
+            assume_time=None) -> tuple[bool, list[str]]:
     name = slug(piece.name)
     out = piece / OUT
     out.mkdir(exist_ok=True)
@@ -140,7 +141,7 @@ def process(piece: Path, force: bool = False, run=audiveris.run) -> tuple[bool, 
                          f"{[p.name for p in made]}; the report covers the first")
             mxl = made[0]
 
-    report = score.check(mxl)
+    report = score.check(mxl, assume_time)
     (out / "report.txt").write_text("\n".join(report) + "\n", encoding="utf-8")
     names = score.part_names(score.load(mxl))
     (out / "names.txt").write_text("".join(f"{pid} | {n}\n" for pid, n in names), encoding="utf-8")
@@ -159,7 +160,7 @@ def process(piece: Path, force: bool = False, run=audiveris.run) -> tuple[bool, 
         merged = out / f"{name}-merged.mxl"
         ok, merge_report = merge.merge_file(mxl, merged, config)
         if ok:
-            check = score.check(merged)
+            check = score.check(merged, assume_time)
             merge_report += ["", *check]
             notes.append(f"merged with merge.json -> {merged.name}; {check[-1]}")
         else:
@@ -173,6 +174,8 @@ def main(argv: list[str]) -> int:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("pieces", nargs="+", type=Path)
     parser.add_argument("--force", action="store_true", help="read with Audiveris again")
+    parser.add_argument("--time", type=score.parse_time, metavar="N/N",
+                        help="time signature off the printed page, for bars Audiveris gave none")
     args = parser.parse_args(argv)
 
     failed = False
@@ -182,7 +185,7 @@ def main(argv: list[str]) -> int:
             failed = True
             continue
         print(f"== {piece}", flush=True)
-        ok, notes = process(piece, args.force)
+        ok, notes = process(piece, args.force, assume_time=args.time)
         for note in notes:
             print(f"   {note}", flush=True)
         print(f"   {'done' if ok else 'FAILED'}: {piece / OUT}", flush=True)
