@@ -1,0 +1,19 @@
+# Files in .devcontainer/ the image is not built from. Docker skips them, and
+# build_inputs_hash.py leaves them out of the build stamp, so editing one does
+# not rebuild. kit.env is here because its values reach the build as arguments,
+# which the stamp covers separately.
+#
+# EXACT FILENAMES ONLY. A line with `*`, `/`, `!` or `?` makes the hash fall back
+# to the whole directory: a pattern it half-understood could shrink what the
+# stamp covers, and a missed rebuild is the failure the stamp exists to prevent.
+run.sh
+kit.env
+kit.local.env
+kit.local.example.env
+devcontainer.json
+project.bashrc
+build_inputs_hash.py
+claude_code_latest.py
+read_local_token.py
+seed_memory.py
+set-project-name.py

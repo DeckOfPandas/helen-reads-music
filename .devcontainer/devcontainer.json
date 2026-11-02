@@ -1,0 +1,15 @@
+{
+  "name": "changeme (sandboxed)",
+  "initializeCommand": "bash .devcontainer/run.sh --build-only",
+  "image": "changeme-devcontainer",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind",
+  "workspaceFolder": "/workspace",
+  "mounts": [
+    "source=changeme-claude-config,target=/state/claude-config,type=volume",
+    "source=changeme-bundle-cache,target=/state/bundle,type=volume"
+  ],
+  "remoteEnv": {
+    "AGENT_GH_TOKEN": "${localEnv:AGENT_GH_TOKEN}"
+  },
+  "updateRemoteUserUID": false
+}

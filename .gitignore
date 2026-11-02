@@ -1,0 +1,9 @@
+tmp/
+.claude/settings.local.json
+.env
+.env.*
+__pycache__/
+.pytest_cache/
+.claude/worktrees/
+scripts/github.local.conf
+.devcontainer/kit.local.env

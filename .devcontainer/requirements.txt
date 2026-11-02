@@ -1,0 +1,9 @@
+# Installed into the image only when kit.env says WITH_PY_REQS=1.
+# Pin exact versions (pkg==1.2.3): an unpinned line means whatever was newest on
+# the day the layer was built, and Docker's cache then keeps that forever.
+# pytest is not here: the Dockerfile always installs it.
+
+# YAML, so a data check need not shell out to Ruby.
+pyyaml==6.0.3
+# Images: crop, slice, measure a screenshot.
+pillow==12.3.0
