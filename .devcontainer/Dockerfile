@@ -78,9 +78,14 @@ ENV NODE_PATH=/opt/playwright/node_modules
 # puts every file under /opt/audiveris; the Ubuntu 22.04 build is the one whose
 # glibc this Debian base satisfies. The package is unpacked, not installed: its
 # postinst only registers a desktop menu entry and MIME type, which fails with
-# no desktop and aborts the install. The apt line is the package's Depends,
-# minus xdg-utils, which only that postinst uses; libgtk-3-0 is for Audiveris's
-# HiDPI probe, which loads it through JNA.
+# no desktop and aborts the install.
+# The apt line is what a headless read loads from outside /opt/audiveris
+# (fontconfig with one font, freetype, libpng; the rest is in the base), not the
+# package's Depends, which are for its desktop GUI: X11, ALSA, and GTK, which
+# alone drags in 83 packages (systemd, dbus, CUPS) and 119 MB. GTK is loaded
+# only by Audiveris's HiDPI probe, which -Dsun.java2d.uiScale=1 skips; that
+# flag is on every run through tools/omr/audiveris.py. The
+# /opt/audiveris/bin/Audiveris launcher does not pass it, so it is not used.
 # The English model must be the full tessdata one: Audiveris starts Tesseract in
 # legacy mode, which tessdata_fast models lack, and then runs with text
 # recognition silently off. The Python libraries render and merge PDF pages.
@@ -90,9 +95,7 @@ RUN if [ "$WITH_AUDIVERIS" = 1 ]; then \
       curl -fsSL -o /tmp/audiveris.deb \
         "https://github.com/Audiveris/audiveris/releases/download/${AUDIVERIS_VERSION}/Audiveris-${AUDIVERIS_VERSION}-ubuntu22.04-x86_64.deb" \
       && apt-get update \
-      && apt-get install -y --no-install-recommends \
-        libasound2 libbsd0 libc6 libmd0 libx11-6 libxau6 libxcb1 libxdmcp6 \
-        libxext6 libxi6 libxrender1 libxtst6 zlib1g libgtk-3-0 \
+      && apt-get install -y --no-install-recommends libfontconfig1 libfreetype6 libpng16-16 \
       && dpkg-deb -x /tmp/audiveris.deb / \
       && /opt/audiveris/lib/runtime/bin/java -version \
       && rm -f /tmp/audiveris.deb \
