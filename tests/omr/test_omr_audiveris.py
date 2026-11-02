@@ -18,10 +18,12 @@ def test_home_is_the_projects_tmp():
     assert all(value.startswith(str(ROOT / "tmp")) for value in env.values())
 
 
-def test_command_runs_the_bundled_java_headless():
-    cmd = audiveris.command(["-batch", "x.pdf"])
+def test_command_runs_the_bundled_java_headless(tmp_path):
+    cmd = audiveris.command(["-batch", "x.pdf"], tmp_path / "home")
     assert cmd[0] == "/opt/audiveris/lib/runtime/bin/java"
     assert "-Djava.awt.headless=true" in cmd and "-Dsun.java2d.uiScale=1" in cmd
+    # Java takes user.home from the user database, not $HOME.
+    assert f"-Duser.home={tmp_path / 'home'}" in cmd
     assert cmd[cmd.index("-cp") + 1] == "/opt/audiveris/lib/app/*"
     assert cmd[-3:] == ["Audiveris", "-batch", "x.pdf"]
 
@@ -60,3 +62,19 @@ def test_audiveris_starts_headless_with_ocr_in_place(tmp_path):
     assert code == 0, text
     assert "-batch" in text and "-export" in text
     assert (audiveris.tessdata_dir(tmp_path / "home") / "eng.traineddata").stat().st_size > 10_000_000
+
+
+@pytest.mark.skipif(not audiveris.JAVA.is_file(), reason="Audiveris is not in this image (WITH_AUDIVERIS=0)")
+def test_a_real_read_keeps_its_native_library_cache_under_the_given_home(tmp_path):
+    import pymupdf
+    pdf = tmp_path / "staff.pdf"
+    with pymupdf.open() as doc:
+        page = doc.new_page()
+        for y in range(200, 240, 8):
+            page.draw_line((60, y), (540, y))
+        doc.save(pdf)
+    with open(tmp_path / "log.txt", "w") as handle:
+        audiveris.run(["-batch", "-export", "-output", str(tmp_path / "out"), "--", str(pdf)],
+                      home=tmp_path / "home", log=handle)
+    assert list((tmp_path / "home" / ".javacpp" / "cache").iterdir()), (
+        "JavaCPP unpacked its libraries somewhere other than the home it was given")

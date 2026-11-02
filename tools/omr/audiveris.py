@@ -17,7 +17,10 @@ to the JVM.
 
 Audiveris keeps its settings, logs and OCR models under XDG_CONFIG_HOME, and
 writes there on every run. HOME and the XDG folders point at
-tmp/audiveris-home/ so nothing lands outside the project. It reads OCR models
+tmp/audiveris-home/ so nothing lands outside the project. So does Java's
+user.home (-Duser.home): Java reads it from the user database, not $HOME, and
+the bundled Tesseract and Leptonica unpack their native libraries into
+<user.home>/.javacpp/cache. It reads OCR models
 from $XDG_CONFIG_HOME/AudiverisLtd/audiveris/tessdata (not XDG_DATA_HOME);
 the full-tessdata English model is copied there from /opt/audiveris-tessdata.
 The tessdata_fast model would leave OCR silently off.
@@ -53,11 +56,12 @@ def tessdata_dir(home: Path) -> Path:
     return home / "config" / "AudiverisLtd" / "audiveris" / "tessdata"
 
 
-def command(args: list[str]) -> list[str]:
+def command(args: list[str], home: Path = DEFAULT_HOME) -> list[str]:
     return [
         str(JAVA),
         "-Djava.awt.headless=true",
         "-Dsun.java2d.uiScale=1",
+        f"-Duser.home={home}",
         "-Xms512m", f"-Xmx{HEAP}",
         "-cp", f"{APP_JARS}/*",
         "Audiveris", *args,
@@ -82,7 +86,7 @@ def run(args: list[str], home: Path = DEFAULT_HOME, log=None) -> int:
         sys.exit(f"audiveris.py: no Java at {JAVA}. Is WITH_AUDIVERIS=1 in this image?")
     prepare_home(home)
     env = {**os.environ, **environment(home)}
-    return subprocess.run(command(args), env=env, cwd=ROOT, stdout=log,
+    return subprocess.run(command(args, home), env=env, cwd=ROOT, stdout=log,
                           stderr=subprocess.STDOUT if log else None).returncode
 
 
@@ -97,7 +101,7 @@ def main(argv: list[str]) -> int:
     if print_only:
         for key, value in environment(DEFAULT_HOME).items():
             print(f"{key}={value}")
-        print(" ".join(command(args)))
+        print(" ".join(command(args, DEFAULT_HOME)))
         return 0
     return run(args)
 
