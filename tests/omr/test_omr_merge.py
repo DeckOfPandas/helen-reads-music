@@ -73,6 +73,18 @@ def test_a_clef_change_between_fragments_is_restated():
     assert root.find("part").findall("measure")[1].findtext("attributes/clef/sign") == "F"
 
 
+def test_a_silent_bar_comes_from_a_fragment_that_wrote_its_rest():
+    # P2 plays bar 1, then has nothing at all in bar 2; P1 wrote the rest.
+    p1 = part("P1", [bar(whole_rest(), 1, attributes()), bar(whole_rest(), 2)])
+    p2 = part("P2", [bar(four_crotchets(), 1, attributes()), '<measure number="2"></measure>'])
+    root = ET.fromstring(make_score([("P1", "Cl.", p1), ("P2", "Clarinet", p2)]))
+    ok, _ = merge.merge(root, ["Clarinet"], {"Cl.": "Clarinet", "Clarinet": "Clarinet"})
+    assert ok
+    bar2 = root.find("part").findall("measure")[1]
+    assert bar2.find("note/rest") is not None
+    assert score.bad_bars(root.find("part")) == []
+
+
 def test_a_conflict_refuses_and_says_where():
     a = part("P1", [bar(four_crotchets(), 1, attributes())])
     b = part("P2", [bar(four_crotchets("E4"), 1, attributes())])

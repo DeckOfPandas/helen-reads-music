@@ -145,6 +145,10 @@ def process(piece: Path, force: bool = False, run=audiveris.run,
                          f"{[p.name for p in made]}; the report covers the first")
             mxl = made[0]
 
+    config = piece / "merge.json"
+    table = json.loads(config.read_text(encoding="utf-8")) if config.is_file() else {}
+    if assume_time is None and table.get("time"):
+        assume_time = score.parse_time(table["time"])
     report = score.check(mxl, assume_time)
     (out / "report.txt").write_text("\n".join(report) + "\n", encoding="utf-8")
     names = score.part_names(score.load(mxl))
@@ -161,11 +165,7 @@ def process(piece: Path, force: bool = False, run=audiveris.run,
     (out / "merge.template.json").write_text(json.dumps(template, indent=2) + "\n", encoding="utf-8")
     notes.append(f"{len(names)} parts; {report[-1]}")
 
-    config = piece / "merge.json"
     if config.is_file():
-        table = json.loads(config.read_text(encoding="utf-8"))
-        if assume_time is None and table.get("time"):
-            assume_time = score.parse_time(table["time"])
         merged = out / f"{name}-merged.mxl"
         ok, merge_report = merge.merge_file(mxl, merged, config)
         if ok:

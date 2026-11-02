@@ -156,7 +156,16 @@ def merge(root: ET.Element, canonical_order: list[str],
             if len(sounding) > 1:
                 conflicts.append((canon, index + 1,
                                   {pid: score.count_notes(bars[pid][index]) for pid in sounding}))
-            source = sounding[0] if sounding else (previous if previous in present else present[0])
+            if sounding:
+                source = sounding[0]
+            else:
+                # A silent bar: keep the source we are on unless its bar is
+                # empty (no rest either) and another fragment wrote the rest.
+                written = [pid for pid in present if bars[pid][index].find("note") is not None]
+                if previous in present and (previous in written or not written):
+                    source = previous
+                else:
+                    source = written[0] if written else present[0]
             measure = bars[source][index]
             wanted = states[source][index]
             if source != previous:
