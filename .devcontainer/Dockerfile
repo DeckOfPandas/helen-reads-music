@@ -74,6 +74,28 @@ RUN if [ "$WITH_PLAYWRIGHT" = 1 ]; then \
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright/ms-playwright
 ENV NODE_PATH=/opt/playwright/node_modules
 
+# Audiveris reads sheet music into MusicXML. Its package brings its own Java and
+# lands in /opt/audiveris; the Ubuntu 22.04 build is the one whose glibc this
+# Debian base satisfies. Its GTK HiDPI probe loads libgtk-3 through JNA.
+# The English model must be the full tessdata one: Audiveris starts Tesseract in
+# legacy mode, which tessdata_fast models lack, and then runs with text
+# recognition silently off. The Python libraries render and merge PDF pages.
+ARG WITH_AUDIVERIS=0
+ARG AUDIVERIS_VERSION=5.11.0
+RUN if [ "$WITH_AUDIVERIS" = 1 ]; then \
+      curl -fsSL -o /tmp/audiveris.deb \
+        "https://github.com/Audiveris/audiveris/releases/download/${AUDIVERIS_VERSION}/Audiveris-${AUDIVERIS_VERSION}-ubuntu22.04-x86_64.deb" \
+      && apt-get update \
+      && apt-get install -y --no-install-recommends /tmp/audiveris.deb libgtk-3-0 \
+      && rm -f /tmp/audiveris.deb \
+      && rm -rf /var/lib/apt/lists/* \
+      && mkdir -p /opt/audiveris-tessdata \
+      && curl -fsSL -o /opt/audiveris-tessdata/eng.traineddata \
+        "https://github.com/tesseract-ocr/tessdata/raw/4.1.0/eng.traineddata" \
+      && pip install --break-system-packages --no-cache-dir \
+        "pillow==12.3.0" "pymupdf==2.1" "pypdf==6.21.4"; \
+    fi
+
 # --break-system-packages is safe in a single-purpose image: nothing else
 # depends on this Python. pytest is always here because tests/kit/ ships in
 # every project made from the kit.
