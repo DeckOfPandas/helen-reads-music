@@ -263,6 +263,7 @@ def process(piece: Path, force: bool = False, run=audiveris.run,
                     return False, notes + [f"merge.json: {err}"]
                 merge_report += ["", f"bars patched by hand: {len(patched)}",
                                  *(f"  {line}" for line in patched)]
+            merge_report += ["", *repair.voice_drum_parts(root, table.get("drum_key"))]
             score.save(root, merged, like=merged)
             check = score.check(merged, assume_time)
             merge_report += ["", *check]

@@ -43,8 +43,8 @@ def test_time_is_written_once_in_order():
     report = repair.repair(root, {"time": "4/4"})
     attributes = root.find("part/measure/attributes")
     assert [c.tag for c in attributes] == ["divisions", "key", "time", "clef"]
-    assert report[0] == "time 4/4 written into 1 part(s)"
-    assert repair.repair(root, {"time": "4/4"})[0] == "time 4/4 written into 0 part(s)"
+    assert "time 4/4 written into 1 part(s)" in report
+    assert "time 4/4 written into 0 part(s)" in repair.repair(root, {"time": "4/4"})
 
 
 def test_a_whole_bar_rest_takes_the_bar_length():
@@ -148,7 +148,7 @@ def test_a_false_octave_clef_is_removed_and_its_notes_moved_back():
     assert score.below_range(root.find("part"), "Oboe") == ["1", "2"]
     report = repair.repair(root, {"octave_clefs": False})
     # Bars 1-2 move (2 + 4 notes); bar 3's plain clef ends the shift.
-    assert report[0] == "octave clefs: 1 '8 below/above' marking(s) removed, 6 note(s) moved back"
+    assert "octave clefs: 1 '8 below/above' marking(s) removed, 6 note(s) moved back" in report
     octaves = [n.findtext("pitch/octave") for n in root.iter("note") if n.find("pitch") is not None]
     assert octaves == ["4", "4"] + ["4"] * 4 + ["4"] * 4
     assert root.find(".//clef-octave-change") is None
@@ -293,6 +293,125 @@ def test_an_open_hi_hat_gets_the_open_mark_and_listed_bars_win_over_matching():
     opened = [n for n in bar2.findall("note") if n.find("notations/technical/open") is not None]
     assert len(opened) == 1 and opened[0].findtext("notehead") == "x" and opened[0].findtext("type") == "quarter"
     assert score.bad_bars(root.find("part")) == []
+
+
+def test_drum_tokens_carry_accents_slashes_and_ties():
+    events = repair.parse_groove_voice("xG5+C5:1^ r:1/2 B4:1/2>~ ~B4:1 sB4:1")
+    assert events[0].strong and [h.cross for h in events[0].heads] == [True, False]
+    assert events[2].accent and events[2].tie_start and events[3].heads[0].tie_stop
+    assert events[4].heads[0].slash
+    root = build([("P1", "Drum Set", f'<part id="P1">{drum_bar(1, KICK_ONLY, True)}</part>')])
+    repair.apply_patches(root, {"Drum Set": {"1": {"up": "B4:1> r:1/2 B4:1/2~ ~B4:1 F5:1>"}}})
+    notes = root.find("part/measure").findall("note")
+    assert notes[0].find("notations/articulations/accent") is not None
+    assert notes[2].find("tie").get("type") == "start" and notes[3].find("tie").get("type") == "stop"
+    assert notes[2].find("notations/tied").get("type") == "start"
+    assert {n.findtext("stem") for n in notes if n.find("unpitched") is not None} == {"up"}
+
+
+def test_a_drum_bar_with_only_a_lower_voice():
+    root = build([("P1", "Drum Set", f'<part id="P1">{drum_bar(1, KICK_ONLY, True)}</part>')])
+    repair.apply_patches(root, {"Drum Set": {"1": {"down": "r:2 D5:1/2 D5:1/2 B4:1"}}})
+    m = root.find("part/measure")
+    assert m.find("backup") is None
+    assert {n.findtext("voice") for n in m.findall("note")} == {"2"}
+    assert score.bad_bars(root.find("part")) == []
+
+
+def test_slash_bars():
+    root = build([("P1", "Drum Set", f'<part id="P1">{drum_bar(1, KICK_ONLY, True)}</part>')])
+    repair.apply_patches(root, {"Drum Set": {"1": {"up": "sB4:1 sB4:1 sB4:1 sB4:1"}}})
+    assert [n.findtext("notehead") for n in root.iter("note")] == ["slash"] * 4
+
+
+def test_every_drum_note_gets_its_instrument_and_voices_their_stems():
+    drums = f'<part id="P1">{drum_bar(1, MISREAD_GROOVE, True)}</part>'
+    root = build([("P1", "Drum Set", drums)])
+    repair.repair(root, {"drum_grooves": {"grooves": {"A": {
+        "up": "xG5:1 xG5:1/2 xG5:1/2 xG5+C5:1 xG5:1/2 oxG5:1/2",
+        "down": "F4+xD4:1 r:1/2 F4:1/2 r:1 r:1"}}}})
+    report = repair.voice_drum_parts(root)
+    assert "NOT IN THE DRUM KEY" not in report[0]
+    notes = [n for n in root.iter("note") if n.find("unpitched") is not None]
+    by_sound = {}
+    for n in notes:
+        by_sound.setdefault(n.find("instrument").get("id"), set()).add(n.findtext("stem"))
+    assert by_sound == {"P1-I42": {"up"}, "P1-I38": {"up"}, "P1-I46": {"up"},
+                        "P1-I36": {"down"}, "P1-I44": {"down"}}
+    declared = {i.get("id"): i.findtext("instrument-name") for i in root.iter("score-instrument")}
+    assert declared == {"P1-I36": "Bass Drum", "P1-I38": "Snare", "P1-I42": "Closed Hi-Hat",
+                        "P1-I44": "Pedal Hi-Hat", "P1-I46": "Open Hi-Hat"}
+    midi = {m.get("id"): m.findtext("midi-unpitched") for m in root.iter("midi-instrument")}
+    assert midi["P1-I36"] == "37" and midi["P1-I42"] == "43"        # General MIDI note + 1
+    sp = root.find("part-list/score-part")
+    assert [c.tag for c in sp] == ["part-name"] + ["score-instrument"] * 5 + ["midi-instrument"] * 5
+
+
+def test_a_drum_note_outside_the_key_is_named_and_the_key_can_grow():
+    bar = ('<measure number="1"><attributes><divisions>1</divisions><time><beats>4</beats>'
+           "<beat-type>4</beat-type></time></attributes>"
+           "<note><unpitched><display-step>E</display-step><display-octave>4</display-octave></unpitched>"
+           "<duration>4</duration><voice>1</voice><notehead>x</notehead></note></measure>")
+    root = build([("P1", "Drum Set", f'<part id="P1">{bar}</part>')])
+    assert "NOT IN THE DRUM KEY: {'E4 x': 1}" in repair.voice_drum_parts(root)[0]
+    repair.voice_drum_parts(root, {"E4 x": 54})
+    assert root.find(".//note/instrument").get("id") == "P1-I54"
+
+
+def _with_lyric(text, chord_member=False):
+    events = [("C5", 1), ("E5+", 1), ("D5", 1), ("C5", 1)] if chord_member else [("C5", 1)] * 4
+    root = build([_timed_part("P1", "Trumpet", events)])
+    target = root.findall(".//note")[1 if chord_member else 0]
+    lyric = ET.SubElement(target, "lyric")
+    ET.SubElement(lyric, "text").text = text
+    return root
+
+
+@pytest.mark.parametrize("text,dynamic", [("f", "f"), ("Mf", "mf"), ('"f', "f"), ("P", "p"), ("Wf", "f")])
+def test_a_dynamic_read_as_a_lyric_becomes_a_dynamic(text, dynamic):
+    root = _with_lyric(text)
+    report = repair.marks_from_lyrics(root, ["Voice"])
+    assert root.find(".//lyric") is None
+    assert root.find(f".//direction/direction-type/dynamics/{dynamic}") is not None
+    assert report[0].startswith("marks read as lyrics: 1 dynamic(s)")
+
+
+@pytest.mark.parametrize("text,mark", [("A", "strong-accent"), (">A", "strong-accent"), ("V", "strong-accent"),
+                                       (">", "accent")])
+def test_an_accent_read_as_a_lyric_becomes_an_accent(text, mark):
+    root = _with_lyric(text)
+    repair.marks_from_lyrics(root, ["Voice"])
+    assert root.find(f".//note/notations/articulations/{mark}") is not None
+
+
+def test_instructions_become_text_and_noise_is_listed():
+    root = _with_lyric("p1zz.")
+    repair.marks_from_lyrics(root, ["Voice"])
+    assert root.findtext(".//direction/direction-type/words") == "pizz."
+    root = _with_lyric("fdirty")
+    repair.marks_from_lyrics(root, ["Voice"])
+    assert root.find(".//dynamics/f") is not None and root.findtext(".//words") == "dirty"
+    root = _with_lyric("[q")
+    report = repair.marks_from_lyrics(root, ["Voice"])
+    assert "lyrics dropped as unreadable (1): Trumpet 1 '[q'" in report[1]
+
+
+def test_a_mark_on_a_chord_note_goes_before_the_chord():
+    root = _with_lyric("f", chord_member=True)
+    repair.marks_from_lyrics(root, ["Voice"])
+    tags = [e.tag for e in root.find("part/measure")]
+    assert tags.index("direction") < tags.index("note")
+    notes = root.find("part/measure").findall("note")
+    assert notes[1].find("chord") is not None
+    assert list(root.find("part/measure")).index(notes[1]) == list(root.find("part/measure")).index(notes[0]) + 1
+
+
+def test_the_voice_keeps_its_lyrics():
+    root = build([_timed_part("P1", "Voice", [("C5", 1)] * 4)])
+    lyric = ET.SubElement(root.find(".//note"), "lyric")
+    ET.SubElement(lyric, "text").text = "f"
+    repair.marks_from_lyrics(root, ["Voice"])
+    assert root.findtext(".//lyric/text") == "f"
 
 
 @pytest.mark.parametrize("token", ["xG5", "Q5:1", "xG:1", "oxQ5:1"])
