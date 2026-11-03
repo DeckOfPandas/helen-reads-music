@@ -76,6 +76,20 @@ def test_doubled_instruments_are_told_apart_by_abbreviation():
     assert mapping == {"P1": "Oboe", "P2": "Piccolo"}
 
 
+def test_two_fragments_never_land_on_one_instrument_in_the_same_bars():
+    # Bass and double bass in unison; the double bass fragment's name is
+    # unreadable, so its notes alone send it to Electric Bass too.
+    line = four_crotchets("D3")
+    clef = attributes(clef="F", line=4)
+    primary = merged([("M1", "Electric Bass", part("M1", [bar(line, 1, clef)])),
+                      ("M2", "Contrabass", part("M2", [bar(four_crotchets("F3"), 1, clef)]))])
+    second = merged([("P1", "E. Bass", part("P1", [bar(line, 1, clef)])),
+                     ("P2", "Voice", part("P2", [bar(line, 1, clef)]))])
+    mapping, report = combine.align(second, primary, {})
+    assert mapping == {"P1": "Electric Bass"}
+    assert "  P2 left out: shares bars with P1 on Electric Bass" in report
+
+
 def test_drums_match_by_stave_position():
     drums = ('<measure number="1">' + attributes() + "".join(
         f"<note><unpitched><display-step>{s}</display-step><display-octave>{o}</display-octave></unpitched>"

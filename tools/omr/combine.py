@@ -124,6 +124,8 @@ def align(second: ET.Element, primary: ET.Element, aliases: dict) -> tuple[dict[
                    zip(score.part_names(primary), primary.findall("part"))}
     report = []
     mapping = {}
+    ranks: dict[str, tuple] = {}
+    sounding: dict[str, set[int]] = {}
     for (pid, name), part in zip(score.part_names(second), second.findall("part")):
         bars = _sounding_bars(part)
         if not bars:
@@ -151,7 +153,19 @@ def align(second: ET.Element, primary: ET.Element, aliases: dict) -> tuple[dict[
             report.append(f"  {pid} '{name}': ties between {tied} ({best:.0%}), left out")
             continue
         mapping[pid] = tied[0]
+        ranks[pid] = (names_agree(name, tied[0]), scores[tied[0]], len(bars))
+        sounding[pid] = bars
         report.append(f"  {pid} '{name}' -> {tied[0]} ({scores[tied[0]]:.0%} of its notes match)")
+    # Two fragments on one instrument in the same bars would make the merge
+    # refuse (doubled instruments match each other's notes): keep the one
+    # whose name fits, else the better match, and leave the other out.
+    for pid in sorted(mapping, key=lambda p: ranks[p], reverse=True):
+        if pid not in mapping:
+            continue
+        for other in [o for o in mapping if o != pid and mapping[o] == mapping[pid]]:
+            if sounding[pid] & sounding[other] and ranks[other] <= ranks[pid]:
+                del mapping[other]
+                report.append(f"  {other} left out: shares bars with {pid} on {mapping[pid]}")
     return mapping, report
 
 
