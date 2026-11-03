@@ -13,7 +13,7 @@ sys.path.insert(0, str(ROOT / "tools" / "omr"))
 
 import repair  # noqa: E402
 import score  # noqa: E402
-from musicxml_maker import (attributes, bar, four_crotchets, part,  # noqa: E402
+from musicxml_maker import (attributes, bar, four_crotchets, part, whole_rest,  # noqa: E402
                             score as make_score, write_mxl)
 
 
@@ -412,6 +412,79 @@ def test_the_voice_keeps_its_lyrics():
     ET.SubElement(lyric, "text").text = "f"
     repair.marks_from_lyrics(root, ["Voice"])
     assert root.findtext(".//lyric/text") == "f"
+
+
+def _violins(bars_one, bars_two):
+    return build([("P1", "Violin I", part("P1", bars_one)), ("P2", "Violin II", part("P2", bars_two))])
+
+
+VIOLIN_LABELS = {"same": "unis.", "divided": "div.", "first": "1.", "second": "2."}
+
+
+def test_combining_two_parts_onto_one_stave():
+    one = [bar(four_crotchets("C5"), 1, attributes()), bar(four_crotchets("E5"), 2),
+           bar(four_crotchets("G5"), 3), bar(whole_rest(), 4)]
+    two = [bar(four_crotchets("C5"), 1, attributes()), bar(four_crotchets("C5"), 2),
+           bar(whole_rest(), 3), bar(four_crotchets("D5"), 4)]
+    root = _violins(one, two)
+    report = repair.combine_parts(root, {"parts": ["Violin I", "Violin II"], "name": "Violins",
+                                         "abbreviation": "Vlns.", "labels": VIOLIN_LABELS})
+    assert report == ["Violin I + Violin II -> Violins: 1 bar(s) the same, 1 only Violin I, "
+                      "1 only Violin II, 1 in two voices"]
+    assert [n for _, n in score.part_names(root)] == ["Violins"]
+    assert root.findtext("part-list/score-part/part-abbreviation") == "Vlns."
+    bars = root.find("part").findall("measure")
+    voices = [sorted({n.findtext("voice") for n in m.findall("note")}) for m in bars]
+    assert voices == [["1"], ["1", "2"], ["1"], ["1"]]
+    stems = {n.findtext("voice"): n.findtext("stem") for n in bars[1].findall("note")}
+    assert stems == {"1": "up", "2": "down"}
+    assert bars[1].find("backup/duration").text == "16"
+    assert [n.findtext("pitch/step") for n in bars[3].findall("note")] == ["D"] * 4
+    words = [m.findtext("direction/direction-type/words") for m in bars]
+    assert words == ["unis.", "div.", "1.", "2."]
+    assert score.bad_bars(root.find("part")) == []
+
+
+def test_a_label_is_written_only_where_the_state_changes():
+    same = [bar(four_crotchets("C5"), n, attributes() if n == 1 else "") for n in (1, 2, 3)]
+    root = _violins(same, [bar(four_crotchets("C5"), n, attributes() if n == 1 else "") for n in (1, 2, 3)])
+    repair.combine_parts(root, {"parts": ["Violin I", "Violin II"], "labels": VIOLIN_LABELS})
+    assert [m.findtext("direction/direction-type/words") for m in root.find("part").findall("measure")] == \
+        ["unis.", None, None]
+
+
+def test_combining_two_grand_staves_staff_by_staff():
+    def grand(rh, lh):
+        return ('<measure number="1">' + untimed(staves=2).replace("</attributes>",
+                "<time><beats>4</beats><beat-type>4</beat-type></time></attributes>")
+                + "".join(f"<note><pitch><step>{s}</step><octave>5</octave></pitch><duration>4</duration>"
+                          f"<voice>1</voice><staff>1</staff></note>" for s in rh)
+                + "<backup><duration>16</duration></backup>"
+                + ("".join(f"<note><pitch><step>{s}</step><octave>3</octave></pitch><duration>4</duration>"
+                           f"<voice>5</voice><staff>2</staff></note>" for s in lh) if lh else
+                   '<note><rest measure="yes"/><duration>16</duration><voice>5</voice><staff>2</staff></note>')
+                + "</measure>")
+    root = build([("P1", "Harp", f'<part id="P1">{grand("CDEF", None)}</part>'),
+                  ("P2", "Piano", f'<part id="P2">{grand("CDEF", "GABC")}</part>')])
+    report = repair.combine_parts(root, {"parts": ["Harp", "Piano"], "name": "Harp & Piano"})
+    m = root.find("part/measure")
+    assert [n.findtext("staff") for n in m.findall("note")] == ["1"] * 4 + ["2"] * 4
+    assert [n.findtext("pitch/step") for n in m.findall("note")][4:] == ["G", "A", "B", "C"]
+    assert "1 bar(s) the same" in report[0]
+    assert score.bad_bars(root.find("part")) == []
+
+
+def test_labels_and_sounds_follow_the_part_name():
+    root = build([("P1", "Contrabass", part("P1", [bar(four_crotchets("C3"), 1, attributes())])),
+                  ("P2", "Violin II", part("P2", [bar(four_crotchets("C5"), 1, attributes())]))])
+    sp = root.find("part-list/score-part")
+    ET.SubElement(sp, "part-abbreviation").text = "Voice"
+    report = repair.fix_labels_and_sounds(root, {})
+    abbreviations = [s.findtext("part-abbreviation") for s in root.iter("score-part")]
+    assert abbreviations == ["Cb.", "Vln. II"]
+    assert [m.findtext("midi-program") for m in root.iter("midi-instrument")] == ["44", "41"]
+    assert [i.findtext("instrument-name") for i in root.iter("score-instrument")] == ["Contrabass", "Violin II"]
+    assert report[0].startswith("labels and playback sounds: Contrabass (Cb., program 44)")
 
 
 @pytest.mark.parametrize("token", ["xG5", "Q5:1", "xG:1", "oxQ5:1"])

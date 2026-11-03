@@ -41,6 +41,16 @@ process.py runs these after the merge. The optional keys in merge.json:
       repair.DRUM_KEY plus these, and puts hands (voice 1) stems up and feet
       (voice 2) stems down.
 
+  "combine": [{"parts": ["Violin I", "Violin II"], "name": "Violins",
+               "abbreviation": "Vlns.", "program": 41,
+               "labels": {"same": "unis.", "divided": "div.", "first": "1.", "second": "2."}}]
+      Two parts onto one part's staves, to save staves (combine_parts).
+      process.py runs it after the patches, which name the parts apart.
+
+  "labels": {"<part>": {"abbreviation": "...", "program": 41}}
+      Abbreviation and General MIDI program (1-128) for a part, where the
+      table in fix_labels_and_sounds does not fit.
+
   "octave_clefs": false
       The score is printed with no octave clefs (no small 8 above or below a
       clef). Audiveris can read a plain treble clef as "8 below" and put the
@@ -822,6 +832,245 @@ def voice_drum_parts(root: ET.Element, extra_key: dict | None = None) -> list[st
             line += f"; NOT IN THE DRUM KEY: {dict(unknown)}"
         report.append(line)
     return report
+
+
+# --- two parts on one stave ------------------------------------------------------
+
+def _staff_streams(measure: ET.Element, staff: int, staves: int) -> list[list[ET.Element]]:
+    """The notes and forwards on one staff of a bar, one list per voice, in order."""
+    streams: dict[str, list[ET.Element]] = {}
+    voice = None
+    for element in measure:
+        if element.tag not in ("note", "forward"):
+            continue
+        on = int(element.findtext("staff") or 1) if staves > 1 else 1
+        if element.tag == "note" and on != staff:
+            continue
+        voice = element.findtext("voice") or voice or "1"
+        if element.tag == "forward" and staves > 1 and element.findtext("staff") and on != staff:
+            continue
+        streams.setdefault(voice, []).append(element)
+    return list(streams.values())
+
+
+def _stream_signature(streams: list[list[ET.Element]], divisions: Fraction) -> list:
+    return [[("r" if e.find("rest") is not None else score.midi(e) if e.tag == "note" else "fwd",
+              Fraction(e.findtext("duration") or 0) / divisions, e.find("chord") is not None)
+             for e in stream] for stream in streams]
+
+
+def _silent(streams: list[list[ET.Element]]) -> bool:
+    return all(e.tag != "note" or e.find("rest") is not None for stream in streams for e in stream)
+
+
+def _stream_span(stream: list[ET.Element]) -> Fraction:
+    return sum((Fraction(e.findtext("duration") or 0) for e in stream
+                if e.find("chord") is None and e.find("grace") is None), Fraction(0))
+
+
+def _copy_stream(stream: list[ET.Element], voice: str, staff: int | None, staves: int,
+                 scale: Fraction, stem: str | None) -> list[ET.Element]:
+    out = []
+    for element in stream:
+        element = copy.deepcopy(element)
+        duration = element.find("duration")
+        if duration is not None:
+            ticks = Fraction(duration.text) * scale
+            if ticks.denominator != 1:
+                raise ValueError("the two parts count time in incompatible divisions")
+            duration.text = str(ticks.numerator)
+        target = element.find("voice")
+        if target is None:
+            target = ET.Element("voice")
+            if element.tag == "note":
+                _place(element, target)
+            else:
+                element.append(target)
+        target.text = voice
+        if element.tag == "note":
+            if staves > 1:
+                on = element.find("staff")
+                if on is None:
+                    on = ET.Element("staff")
+                    _place(element, on)
+                on.text = str(staff)
+            if stem and element.find("rest") is None:
+                old = element.find("stem")
+                if old is None:
+                    old = ET.Element("stem")
+                    _place(element, old)
+                old.text = stem
+        out.append(element)
+    return out
+
+
+def combine_parts(root: ET.Element, spec: dict) -> list[str]:
+    """Put two parts on one part's staves: {"parts": [A, B], "name": ...,
+    "abbreviation": ..., "labels": {"same": "unis.", "divided": "div.",
+    "first": "Hp.", "second": "Pno."}}. Bar by bar and staff by staff:
+    the same notes are written once; if one part rests, the other's notes
+    are written; if both play different notes, A goes in the upper voice
+    (stems up) and B in a lower one (stems down). A label, where given, is
+    written as text where the state changes. B's part is removed."""
+    first, second = spec["parts"]
+    previous: list[ET.Element] = []
+    names = {name: pid for pid, name in score.part_names(root)}
+    for name in (first, second):
+        if name not in names:
+            raise ValueError(f"combine names no part {name!r}")
+    parts = {p.get("id"): p for p in root.findall("part")}
+    a, b = parts[names[first]], parts[names[second]]
+    a_states, b_states = merge.attribute_states(a), merge.attribute_states(b)
+    b_bars = {m.get("number"): (m, s) for m, s in zip(b.findall("measure"), b_states)}
+    labels = spec.get("labels") or {}
+    counts = Counter()
+    last_state = None
+    for measure, a_state in zip(a.findall("measure"), a_states):
+        number = measure.get("number")
+        if number not in b_bars:
+            continue
+        b_measure, b_state = b_bars[number]
+        a_div, b_div = _divisions(measure, a_state), _divisions(b_measure, b_state)
+        staves = int(measure.findtext("attributes/staves") or (a_state[("staves", "1")].text
+                     if ("staves", "1") in a_state else 1))
+        streams: list[list[ET.Element]] = []          # each starts at the bar's start
+        states = []
+        try:
+            for staff in range(1, staves + 1):
+                mine = _staff_streams(measure, staff, staves)
+                theirs = _staff_streams(b_measure, staff, staves)
+                base = 1 + 4 * (staff - 1)
+                if _stream_signature(mine, a_div) == _stream_signature(theirs, b_div) or _silent(theirs):
+                    chosen = [(s, None, Fraction(1)) for s in mine]
+                    states.append("silent" if _silent(mine) and _silent(theirs) else
+                                  "first" if _silent(theirs) else "same")
+                elif _silent(mine):
+                    chosen = [(s, None, a_div / b_div) for s in theirs]
+                    states.append("second")
+                else:
+                    chosen = ([(s, "up", Fraction(1)) for s in mine]
+                              + [(s, "down", a_div / b_div) for s in theirs])
+                    states.append("divided")
+                for index, (stream, stem, scale) in enumerate(chosen):
+                    streams.append(_copy_stream(stream, str(base + index), staff, staves, scale, stem))
+        except ValueError as err:
+            raise ValueError(f"combine {first} + {second} bar {number}: {err}") from err
+        played = [s for s in states if s != "silent"]
+        if "divided" in played or ("first" in played and "second" in played):
+            state = "divided"
+        elif "same" in played:                          # both play on some staff
+            state = "same"
+        elif "second" in played:
+            state = "second"
+        elif "first" in played:
+            state = "first"
+        else:
+            state = "same" if played else "silent"
+        counts[state] += 1
+        new: list[ET.Element] = []
+        for stream in streams:
+            if new:
+                backup = ET.Element("backup")
+                ET.SubElement(backup, "duration").text = str(int(_stream_span(previous)))
+                new.append(backup)
+            new += stream
+            previous = stream
+        for element in [e for e in measure if e.tag in ("note", "backup", "forward")]:
+            measure.remove(element)
+        position = len(measure)
+        while position and measure[position - 1].tag == "barline":
+            position -= 1
+        for offset, element in enumerate(new):
+            measure.insert(position + offset, element)
+        if state in ("second", "divided"):            # B's dynamics and instructions come too
+            start = 0
+            while start < len(measure) and measure[start].tag in ("print", "attributes"):
+                start += 1
+            for direction in b_measure.findall("direction"):
+                if direction.find(".//dynamics") is not None or direction.find(".//words") is not None:
+                    measure.insert(start, copy.deepcopy(direction))
+        if state != "silent" and state != last_state:
+            text = labels.get(state)
+            if text and new:
+                direction = ET.Element("direction", {"placement": "above"})
+                ET.SubElement(ET.SubElement(direction, "direction-type"), "words").text = text
+                measure.insert(list(measure).index(new[0]), direction)
+            last_state = state
+    root.remove(b)
+    part_list = root.find("part-list")
+    for sp in list(part_list):
+        if sp.tag == "score-part" and sp.get("id") == b.get("id"):
+            part_list.remove(sp)
+        elif sp.tag == "score-part" and sp.get("id") == a.get("id"):
+            sp.find("part-name").text = spec.get("name", first)
+            abbreviation = sp.find("part-abbreviation")
+            if abbreviation is None:
+                abbreviation = ET.Element("part-abbreviation")
+                sp.insert(list(sp).index(sp.find("part-name")) + 1, abbreviation)
+            abbreviation.text = spec.get("abbreviation", spec.get("name", first))
+    return [f"{first} + {second} -> {spec.get('name', first)}: {counts['same']} bar(s) the same, "
+            f"{counts['first']} only {first}, {counts['second']} only {second}, "
+            f"{counts['divided']} in two voices"]
+
+
+# --- labels and playback sounds -----------------------------------------------
+
+# Abbreviation and General MIDI program (1-128, as MusicXML counts) by a word
+# in the part name, first match wins.
+INSTRUMENT_TABLE = (
+    ("piccolo", "Picc.", 73), ("flute", "Fl.", 74), ("oboe", "Ob.", 69), ("clarinet", "Cl.", 72),
+    ("bassoon", "Bsn.", 71), ("horn", "Hn.", 61), ("trumpet", "Tpt.", 57), ("trombone", "Tbn.", 58),
+    ("tuba", "Tba.", 59), ("alto sax", "A. Sax.", 66), ("tenor sax", "T. Sax.", 67),
+    ("marimba", "Mar.", 13), ("vibraphone", "Vib.", 12), ("harp", "Hp.", 47), ("piano", "Pno.", 1),
+    ("guitar", "Gtr.", 25), ("electric bass", "E. Bass", 34), ("bass guitar", "B. Gtr.", 34),
+    ("voice", "Voice", 54), ("violins", "Vlns.", 41), ("violin", "Vln.", 41), ("viola", "Vla.", 42),
+    ("violoncello", "Vc.", 43), ("cello", "Vc.", 43), ("contrabass", "Cb.", 44), ("double bass", "Cb.", 44),
+)
+
+
+def fix_labels_and_sounds(root: ET.Element, overrides: dict | None = None) -> list[str]:
+    """Give each pitched part an abbreviation and a playback sound that fit
+    its name. The merge copies them from the first fragment, which Audiveris
+    named however it read it (a double bass abbreviated "Voice", everything
+    played as "Voice Oohs"). Drum parts keep the instruments voice_drum_parts
+    gave them. merge.json "labels": {"<part>": {"abbreviation": ..,
+    "program": ..}} overrides the table."""
+    overrides = overrides or {}
+    fixed = []
+    for sp in root.iter("score-part"):
+        pid, name = sp.get("id"), (sp.findtext("part-name") or "")
+        part = next(p for p in root.findall("part") if p.get("id") == pid)
+        if part.find(".//unpitched") is not None:
+            continue
+        lowered = name.lower()
+        row = next((r for r in INSTRUMENT_TABLE if r[0] in lowered), None)
+        wanted = overrides.get(name, {})
+        abbreviation = wanted.get("abbreviation") or (row[1] if row else None)
+        program = wanted.get("program") or (row[2] if row else None)
+        numeral = name.split()[-1] if name.split() and name.split()[-1] in ("I", "II", "III") else None
+        if numeral and abbreviation and not wanted.get("abbreviation"):
+            abbreviation = f"{abbreviation} {numeral}"             # Vln. I, Vln. II
+        if abbreviation:
+            element = sp.find("part-abbreviation")
+            if element is None:
+                element = ET.Element("part-abbreviation")
+                sp.insert(list(sp).index(sp.find("part-name")) + 1, element)
+            element.text = abbreviation
+        if program:
+            for old in sp.findall("score-instrument") + sp.findall("midi-instrument"):
+                sp.remove(old)
+            instrument = ET.Element("score-instrument", {"id": f"{pid}-I1"})
+            ET.SubElement(instrument, "instrument-name").text = name
+            midi = ET.Element("midi-instrument", {"id": f"{pid}-I1"})
+            ET.SubElement(midi, "midi-program").text = str(program)
+            position = list(sp).index(sp.find("part-abbreviation")) + 1
+            sp.insert(position, instrument)
+            sp.insert(position + 1, midi)
+            for note in part.iter("note"):
+                for old in note.findall("instrument"):
+                    old.set("id", f"{pid}-I1")
+        fixed.append(f"{name} ({abbreviation}, program {program})")
+    return [f"labels and playback sounds: {'; '.join(fixed)}"]
 
 
 # --- marks Audiveris read as lyrics --------------------------------------------

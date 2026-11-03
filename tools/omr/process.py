@@ -264,6 +264,15 @@ def process(piece: Path, force: bool = False, run=audiveris.run,
                 merge_report += ["", f"bars patched by hand: {len(patched)}",
                                  *(f"  {line}" for line in patched)]
             merge_report += ["", *repair.voice_drum_parts(root, table.get("drum_key"))]
+            labels = dict(table.get("labels") or {})
+            try:
+                for spec in table.get("combine") or []:
+                    merge_report += repair.combine_parts(root, spec)
+                    name = spec.get("name", spec["parts"][0])
+                    labels.setdefault(name, {k: spec[k] for k in ("abbreviation", "program") if k in spec})
+            except ValueError as err:
+                return False, notes + [f"merge.json: {err}"]
+            merge_report += repair.fix_labels_and_sounds(root, labels)
             score.save(root, merged, like=merged)
             check = score.check(merged, assume_time)
             merge_report += ["", *check]
