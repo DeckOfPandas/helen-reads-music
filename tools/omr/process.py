@@ -40,8 +40,10 @@ Everything made goes in library/<piece>/omr/:
                                 refused; how the second read was matched and
                                 which bars came from it; what the PDF's drawing
                                 corrected (drawing_check.py, when
-                                library/<piece>/glyphs.json exists); the check
-                                of the result
+                                library/<piece>/glyphs.json exists); the parts
+                                that double each other and the bars filled
+                                from a double (doublings.py); the check of the
+                                result
   audiveris.log                 the full Audiveris log
   work/                         the PDF handed to Audiveris
 
@@ -63,6 +65,7 @@ from pathlib import Path
 
 import audiveris
 import combine
+import doublings
 import draft
 import merge
 import pages
@@ -261,6 +264,8 @@ def process(piece: Path, force: bool = False, run=audiveris.run,
                                  *(f"  {line}" for line in borrowed)]
             if table.get("drawing_check", True):
                 merge_report += ["", *drawing_pass(root, piece, table, assume_time)]
+            if table.get("doublings", True):
+                merge_report += ["", *doublings.doublings(root, assume_time, skip=_patched(table))]
             if table.get("patches"):
                 try:
                     patched = repair.apply_patches(root, table["patches"], assume_time)
@@ -290,6 +295,12 @@ def process(piece: Path, force: bool = False, run=audiveris.run,
     return True, notes
 
 
+def _patched(table: dict) -> set[tuple[str, str]]:
+    """(part, bar) for every bar merge.json patches by hand."""
+    return {(part, bar) for part, bars in (table.get("patches") or {}).items() if not part.startswith("_")
+            for bar in bars if not bar.startswith("_")}
+
+
 def drawing_pass(root: score.ET.Element, piece: Path, table: dict, assume_time,
                  patched_only: bool = False) -> list[str]:
     """Check and correct the score against the PDFs' own drawing
@@ -305,8 +316,7 @@ def drawing_pass(root: score.ET.Element, piece: Path, table: dict, assume_time,
         import pymupdf  # noqa: F401
     except ImportError:
         return ["drawing check: PyMuPDF is not installed; skipped"]
-    skip = {(part, bar) for part, bars in (table.get("patches") or {}).items() if not part.startswith("_")
-            for bar in bars if not bar.startswith("_")}
+    skip = _patched(table)
     if patched_only:
         findings, _ = drawing_check.check(root, piece, pdfs, fix=True, assume=assume_time, only=skip)
         return [f"hand patches checked against the drawing: {len(findings)} disagree, "

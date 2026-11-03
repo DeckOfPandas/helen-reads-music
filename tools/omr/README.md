@@ -46,6 +46,8 @@ reading adds up and differs from the score, it wins:
   kept at their beat);
 - rests missing from an otherwise right bar are put back;
 - ties are set as drawn;
+- a fingered tremolo (two minims a beam's strokes apart, together lasting
+  one) is written as one;
 - a drum bar is written from the drawing, voices as drawn, a voice the page
   leaves without rests padded with invisible ones.
 
@@ -53,6 +55,19 @@ A bar whose drawing does not add up (tuplets, grace notes) is reported, not
 changed. Bars patched by hand are left alone; after the patches they are
 checked against the drawing, and only their ties are corrected. A scanned
 PDF has no drawing, and no `glyphs.json` means no check.
+
+## Doublings
+
+Parts that play the same notes (harp and piano, bass guitar and double
+bass, a trumpet doubling the oboe, octaves apart or not) check each other.
+`doublings.py` finds every pair of staves that agree in most bars where
+both play, and lists them in `merge-report.txt`. A bar of one that does
+not add up while its double's does is given its double's rhythm. It keeps
+its own pitches when it has as many notes, since a reader gets rhythm wrong
+far more often than pitch. Otherwise it takes the double's pitches too,
+respelt into its own transposition, and the report says to check them.
+This runs after the drawing check, so for a score with a drawing there is
+usually nothing left for it; for a scan it is the main second opinion.
 
 ## Merging the parts Audiveris split
 
@@ -87,6 +102,7 @@ call:
 | `"drum_grooves": {...}` | Writes whole kit grooves (hi-hats included, which Audiveris misses) into the bars whose kick and snare match, or into listed bars; see `repair.py --help` |
 | `"borrow_rests": false` | Turns off putting back rests a short bar is missing, copied from a matching bar elsewhere |
 | `"drawing_check": false` | Turns off checking and correcting against the PDF's drawing |
+| `"doublings": false` | Turns off filling bars from the parts that double them |
 
 ## Checking what came out
 
@@ -111,6 +127,7 @@ bar the two reads got right but differently. Those are the bars to look at.
 | `vector.py` | The PDF's drawing: staves, bar lines, stems, named shapes; `survey` makes `glyphs.json` |
 | `vector_read.py` | One bar of one stave read from the drawing: notes, lengths, ties, voices, pitches |
 | `drawing_check.py` | The score checked and corrected against the drawing |
+| `doublings.py` | Parts that double each other, filling each other's broken bars |
 
 Each one's `--help` (or its docstring) says what it does and why. Tests are
 in `tests/omr/`, on music they generate.

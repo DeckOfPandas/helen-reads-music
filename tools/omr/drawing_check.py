@@ -340,6 +340,17 @@ def _set_ties(measure: ET.Element, staff: int, staves: int, drawn: list[tuple]) 
 def _replace_staff(measure: ET.Element, staff: int, staves: int, voices: dict[str, list[vector_read.Event]],
                    divisions: Fraction, expected: Fraction) -> None:
     """The drawing's voices for one staff; other staves' notes kept as they were."""
+    base = 1 + 4 * (staff - 1)
+    mine = [_pitched_notes(events, str(base + index), staff, staves, divisions, expected)
+            for index, events in enumerate(voices.values())]
+    replace_staff_notes(measure, staff, staves, mine, divisions)
+
+
+def replace_staff_notes(measure: ET.Element, staff: int, staves: int, mine: list[list[ET.Element]],
+                        divisions: Fraction) -> None:
+    """One staff's notes replaced by these voice streams (each from the
+    bar's start); other staves' notes kept; the old lyrics carried over when
+    the notes line up one to one."""
     kept: dict[tuple[int, str], list[ET.Element]] = defaultdict(list)
     old_lyrics: list[list[ET.Element]] = []
     for note in measure.findall("note"):
@@ -349,10 +360,6 @@ def _replace_staff(measure: ET.Element, staff: int, staves: int, voices: dict[st
                 old_lyrics.append([copy.deepcopy(l) for l in note.findall("lyric")])
             continue
         kept[(on, note.findtext("voice") or "1")].append(copy.deepcopy(note))
-    base = 1 + 4 * (staff - 1)
-    mine = []
-    for index, events in enumerate(voices.values()):
-        mine.append(_pitched_notes(events, str(base + index), staff, staves, divisions, expected))
     heads = [n for stream in mine for n in stream if n.find("chord") is None and n.find("rest") is None]
     if old_lyrics and len(heads) == len(old_lyrics):
         for note, lyrics in zip(heads, old_lyrics):
