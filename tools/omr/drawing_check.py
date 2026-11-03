@@ -17,8 +17,9 @@ vector_read.py). For every page:
    ties included. Where the reading adds up and differs from the score:
    - if only the ties differ, they are set as drawn;
    - if the score only lacks rests, they are put in where drawn;
-   - otherwise the stave's notes are replaced by the reading (lyrics carried
-     over when the notes line up one to one; directions keep their beat).
+   - otherwise the stave's notes are replaced by the reading, x and slash
+     heads as drawn; each old lyric moves to the new note at its place on
+     the page, and directions keep their beat.
    A drum part is written from the reading bar by bar, voices as drawn, a
    voice the page leaves without rests padded with invisible ones.
 4. Where the reading does not add up (tuplets, grace notes) but the symbol
@@ -181,13 +182,21 @@ def _drawn_voices(voices: dict[str, list[vector_read.Event]], expected: Fraction
 # --- writing a reading into the score ------------------------------------------------
 
 def _pitched_notes(events: list[vector_read.Event], voice: str, staff: int | None, staves: int,
-                   divisions: Fraction, expected: Fraction) -> list[ET.Element]:
+                   divisions: Fraction, expected: Fraction,
+                   origin: tuple[float, float] | None = None) -> list[ET.Element]:
+    """MusicXML notes for one voice's events. With `origin` (the bar's left
+    x and the stave's line gap), each note gets its default-x: tenths of a
+    space from the bar line to its head's left edge, the measure Audiveris
+    writes, so the old notes' lyrics can find the new notes they belong to."""
     notes = []
     for event in events:
         length = expected if event.whole_bar else event.length
         tremolo = next((m for m in event.marks if m.startswith("tremolo")), None)
+        lefts = [h.left for h in event.heads if h.left is not None]
         for index, head in enumerate(sorted(event.heads, key=lambda h: h.step) or [None]):
             note = ET.Element("note")
+            if origin is not None and lefts:
+                note.set("default-x", str(round((min(lefts) - origin[0]) / origin[1] * 10)))
             if index:
                 note.append(ET.Element("chord"))
             if head is None:
@@ -215,6 +224,8 @@ def _pitched_notes(events: list[vector_read.Event], voice: str, staff: int | Non
                 repair._set_length(note, length, divisions)
             if head is not None and event.stem:
                 repair._place(note, repair._text_element("stem", event.stem))
+            if head is not None and head.kind in ("x", "slash"):
+                repair._place(note, repair._text_element("notehead", head.kind))
             notations = ET.Element("notations")
             ties = [kind for kind, on in (("stop", head is not None and head.tie_stop),
                                           ("start", head is not None and head.tie_start)) if on]
@@ -338,33 +349,64 @@ def _set_ties(measure: ET.Element, staff: int, staves: int, drawn: list[tuple]) 
 
 
 def _replace_staff(measure: ET.Element, staff: int, staves: int, voices: dict[str, list[vector_read.Event]],
-                   divisions: Fraction, expected: Fraction) -> None:
+                   divisions: Fraction, expected: Fraction, origin: tuple[float, float] | None = None) -> None:
     """The drawing's voices for one staff; other staves' notes kept as they were."""
     base = 1 + 4 * (staff - 1)
-    mine = [_pitched_notes(events, str(base + index), staff, staves, divisions, expected)
+    mine = [_pitched_notes(events, str(base + index), staff, staves, divisions, expected, origin)
             for index, events in enumerate(voices.values())]
     replace_staff_notes(measure, staff, staves, mine, divisions)
+
+
+LYRIC_REACH = 12        # tenths: how far a lyric's old note may sit from the new note it moves to
+
+
+def _carry_lyrics(old: list[tuple[str | None, list[ET.Element]]], heads: list[ET.Element]) -> None:
+    """Put the old notes' lyrics on the new notes. Where every note on both
+    sides has a default-x, each old note's lyrics go to the new note nearest
+    it, within LYRIC_REACH: a note gained or lost then takes no lyric from
+    its neighbours. Otherwise only when the notes line up one to one."""
+    def tenths(value: str | None) -> float | None:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    sung = [(tenths(where), lyrics) for where, lyrics in old if lyrics]
+    if not sung:
+        return
+    at = [(tenths(h.get("default-x")), h) for h in heads]
+    if all(where is not None for where, _ in sung) and all(where is not None for where, _ in at):
+        for where, lyrics in sung:
+            distance, near = min(((abs(x - where), h) for x, h in at), key=lambda d: d[0], default=(None, None))
+            if near is None or distance > LYRIC_REACH:
+                continue
+            taken = {l.get("number", "1") for l in near.findall("lyric")}
+            for lyric in lyrics:
+                if lyric.get("number", "1") not in taken:
+                    repair._place(near, lyric)
+        return
+    if len(heads) == len(old):
+        for note, (_, lyrics) in zip(heads, old):
+            for lyric in lyrics:
+                repair._place(note, lyric)
 
 
 def replace_staff_notes(measure: ET.Element, staff: int, staves: int, mine: list[list[ET.Element]],
                         divisions: Fraction) -> None:
     """One staff's notes replaced by these voice streams (each from the
-    bar's start); other staves' notes kept; the old lyrics carried over when
-    the notes line up one to one."""
+    bar's start); other staves' notes kept; the old lyrics carried over
+    (`_carry_lyrics`)."""
     kept: dict[tuple[int, str], list[ET.Element]] = defaultdict(list)
-    old_lyrics: list[list[ET.Element]] = []
+    old: list[tuple[str | None, list[ET.Element]]] = []
     for note in measure.findall("note"):
         on = int(note.findtext("staff") or 1) if staves > 1 else 1
         if on == staff:
             if note.find("chord") is None and note.find("rest") is None:
-                old_lyrics.append([copy.deepcopy(l) for l in note.findall("lyric")])
+                old.append((note.get("default-x"), [copy.deepcopy(l) for l in note.findall("lyric")]))
             continue
         kept[(on, note.findtext("voice") or "1")].append(copy.deepcopy(note))
     heads = [n for stream in mine for n in stream if n.find("chord") is None and n.find("rest") is None]
-    if old_lyrics and len(heads) == len(old_lyrics):
-        for note, lyrics in zip(heads, old_lyrics):
-            for lyric in lyrics:
-                repair._place(note, lyric)
+    _carry_lyrics(old, heads)
     streams = []
     for s in range(1, staves + 1):
         if s == staff:
@@ -709,7 +751,8 @@ def check(root: ET.Element, piece: Path, pdfs: list[Path], fix: bool = True,
                     finding.what += "; rests put back"
                     counts["rests"] += 1
                     continue
-                _replace_staff(measure, slot.staff, staves, voices, divisions, expected)
+                _replace_staff(measure, slot.staff, staves, voices, divisions, expected,
+                               (page.bar_lines[stave][k], page.staves[stave].gap))
                 finding.fixed = True
                 finding.what += "; replaced by the drawing's reading"
                 counts["replaced"] += 1

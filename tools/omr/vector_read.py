@@ -49,6 +49,7 @@ class Head:
     accidental: int | None = None   # drawn just before it
     tie_start: bool = False         # tied on to the next note
     tie_stop: bool = False          # tied from the note before
+    left: float | None = None       # the head's left edge, where MusicXML's default-x points
 
 
 @dataclass
@@ -187,7 +188,7 @@ def read_bar(page: vector.Page, beams: list[Beam], stave_index: int, bar: int,
     chords: dict[int, Event] = {}
     loose: list[Event] = []
     for glyph in heads:
-        head = Head(round(stave.step(glyph.cy)), HEADS[glyph.name], glyph.cx, glyph.cy)
+        head = Head(round(stave.step(glyph.cy)), HEADS[glyph.name], glyph.cx, glyph.cy, left=glyph.x0)
         before = [a for a in accidentals if 0 < glyph.x0 - a.x1 < gap * 1.6 and abs(a.cy - glyph.cy) < gap * 0.7]
         if before:
             head.accidental = ACCIDENTALS[min(before, key=lambda a: glyph.x0 - a.x1).name]
@@ -223,11 +224,17 @@ def read_bar(page: vector.Page, beams: list[Beam], stave_index: int, bar: int,
             merged_loose.append(event)
     events = list(chords.values()) + merged_loose
 
+    # A mark above a high note can sit nearer the stave above, and be placed
+    # there: marks are looked for across the page, and each goes to the
+    # nearest head, on whichever stave.
+    marks = [g for g in page.glyphs if g.name in MARKS and left <= g.cx <= right]
+    others = [g for g in page.glyphs if g.name in HEADS and g.stave != stave_index]
     for event in events:
-        for glyph in glyphs:
-            if glyph.name not in MARKS:
-                continue
+        for glyph in marks:
             if abs(glyph.cx - event.x) < gap * 1.2 and any(abs(glyph.cy - h.y) < gap * 3.2 for h in event.heads):
+                mine = min(abs(glyph.cy - h.y) for h in event.heads)
+                if any(abs(o.cx - glyph.cx) < gap * 1.2 and abs(o.cy - glyph.cy) < mine for o in others):
+                    continue
                 if glyph.name == "dot-small" and any(abs(glyph.cy - h.y) < gap * 0.6 for h in event.heads):
                     continue                                    # beside, not above: not staccato
                 event.marks.add(MARKS[glyph.name])

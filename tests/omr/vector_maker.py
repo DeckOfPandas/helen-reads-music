@@ -60,7 +60,7 @@ SHAPES = {
     "clef-treble": (7.0, 20.0, "polygon", 14),
     "clef-bass": (7.5, 8.5, "polygon", 15),
     "clef-percussion": (3.0, 6.0, "polygon", 16),
-    "accent": (4.0, 2.5, "polygon", 3),
+    "accent": (4.0, 2.5, "polygon", 4),     # `catalogue` needs a shape that fills its box
 }
 
 

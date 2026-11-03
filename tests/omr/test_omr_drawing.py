@@ -128,6 +128,13 @@ def page(tmp_path):
     return drawn, beams, curves
 
 
+def test_a_picture_of_bars_to_check_by_eye(tmp_path):
+    piece, _ = engrave(tmp_path)
+    out = vector.picture(piece, 1, 0, 1, 2)
+    assert out == piece / "omr" / "views" / "bars" / "page1-stave0-bars1-2.png"
+    assert out.read_bytes()[:4] == b"\x89PNG"
+
+
 def test_page_has_three_staves_of_three_bars(page):
     drawn, _, _ = page
     assert len(drawn.staves) == 3
@@ -156,6 +163,31 @@ def test_reads_a_tie_between_two_notes(page):
     first, second = voices["single"]
     assert (first.heads[0].tie_start, first.heads[0].tie_stop) == (True, False)
     assert (second.heads[0].tie_start, second.heads[0].tie_stop) == (False, True)
+
+
+def test_a_mark_nearer_the_stave_above_belongs_to_its_note(tmp_path):
+    # A whole note three ledger lines above the lower stave, an accent above
+    # it: the accent sits nearer the upper stave, but it is the note's.
+    e = Engraver()
+    upper = e.stave(100.0, [50.0, 130.0])
+    e.rest(upper, 88.0, "whole")
+    lower = e.stave(136.0, [50.0, 130.0])
+    head = e.head(lower, 88.0, 14, "whole")
+    e.glyph("accent", head.x0 + 0.25, head.y0 - 8.0)
+    piece = tmp_path / "piece"
+    piece.mkdir()
+    pdf = e.save(piece / "page.pdf")
+    e.catalogue(pdf, piece)
+    with pymupdf.open(pdf) as doc:
+        drawn = vector.read_page(doc[0])
+        beams = vector_read.beams_on_page(doc[0])
+    vector.name_glyphs(drawn, vector.load_catalogue(piece))
+    accent = next(g for g in drawn.glyphs if g.name == "accent")
+    assert accent.stave == 0                                    # placed with the upper stave
+    (note,) = vector_read.read_bar(drawn, beams, 1, 0, Fraction(4))["single"]
+    assert note.marks == {"accent"}
+    (rest,) = vector_read.read_bar(drawn, beams, 0, 0, Fraction(4))["single"]
+    assert rest.marks == set()
 
 
 def test_reads_whole_and_half_rests_by_where_they_sit(page):
@@ -276,6 +308,44 @@ def test_rebuild_keeps_a_direction_at_its_beat():
                          f"<voice>1</voice></note>") for _ in range(4)]
     drawing_check._rebuild(measure, [new], Fraction(1))
     assert [e.tag for e in measure] == ["attributes", "note", "note", "direction", "note", "note"]
+
+
+def test_x_heads_and_default_x_written_from_the_drawing():
+    head = vector_read.Head(2, "x", 72.0, 0.0, left=70.0)
+    head.pitch = ("B", -1, 4)
+    event = vector_read.Event(72.0, Fraction(1), [head], "up")
+    (note,) = drawing_check._pitched_notes([event], "1", None, 1, Fraction(1), Fraction(4), origin=(50.0, 2.0))
+    assert note.findtext("notehead") == "x"
+    assert note.get("default-x") == "100"                       # 20 points, 10 spaces, from the bar line
+
+
+def sung(where: str | None, text: str | None = None) -> ET.Element:
+    note = ET.fromstring("<note><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration></note>")
+    if where is not None:
+        note.set("default-x", where)
+    if text:
+        ET.SubElement(ET.SubElement(note, "lyric"), "text").text = text
+    return note
+
+
+def old_lyrics(notes: list[ET.Element]) -> list:
+    return [(n.get("default-x"), n.findall("lyric")) for n in notes]
+
+
+def test_lyrics_follow_their_notes_place_when_a_note_is_put_back():
+    # The reader lost a note at the start of the bar: by count, every word
+    # would slide one note left; by place, each stays on its note.
+    old = [sung("100", "un"), sung("140", "der"), sung("180", "the")]
+    new = [sung("16"), sung("103"), sung("142"), sung("182")]
+    drawing_check._carry_lyrics(old_lyrics(old), new)
+    assert [n.findtext("lyric/text") for n in new] == [None, "un", "der", "the"]
+
+
+def test_lyrics_carried_one_to_one_without_places():
+    old = [sung(None, "un"), sung(None, "der")]
+    new = [sung(None), sung(None)]
+    drawing_check._carry_lyrics(old_lyrics(old), new)
+    assert [n.findtext("lyric/text") for n in new] == ["un", "der"]
 
 
 def test_divisions_restated_in_a_bar_count_from_the_last():

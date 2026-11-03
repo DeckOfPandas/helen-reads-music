@@ -4,6 +4,11 @@
 USAGE (from the repo root):
     python3 tools/omr/vector.py survey library/<piece> [--min N]  # cluster the shapes; write a catalogue draft
     python3 tools/omr/vector.py show library/<piece> <page> # what was found on a page
+    python3 tools/omr/vector.py picture library/<piece> <page> <stave> <first bar> <last bar>
+        # a PNG of those bars of one stave, to check by eye: page from 1;
+        # stave from 0, top down; bars counted on the page from 0.
+        # merge-report.txt lists which stave is which part on each page,
+        # and each page's bar numbers.
 
 A PDF exported from notation software is vector drawing, not pixels: every
 stave line, bar line and symbol is an exact shape at an exact place. The
@@ -23,10 +28,12 @@ scanned PDF has no such drawing; then there are no staves and nothing here
 applies.
 
 Symbol names used: notehead-black, notehead-half, notehead-whole,
-notehead-x, rest-whole (or half: one rectangle, told apart by where it sits),
-rest-quarter, rest-eighth, rest-16th, dot, flag-8th-up, flag-8th-down,
-flag-16th-up, flag-16th-down, flat, sharp, natural, tremolo, beam,
-open (the small circle of an open hi-hat), other.
+notehead-x, notehead-slash, rest-whole (or half: one rectangle, told apart
+by where it sits), rest-quarter, rest-eighth, rest-16th, flag-8th-up,
+flag-8th-down, flag-16th-up, flag-16th-down, dot (augmentation), dot-small
+(staccato), accent, marcato, tenuto, open (the small circle of an open
+hi-hat), flat, sharp, natural, clef-treble, clef-bass, clef-alto,
+clef-percussion, other (anything else: text, dynamics, slurs).
 """
 from __future__ import annotations
 
@@ -408,8 +415,30 @@ def main(argv: list[str]) -> int:
             print(f"stave {index}: y {stave.top:.1f}-{stave.bottom:.1f} gap {stave.gap:.2f}, "
                   f"{page.bar_count(index)} bars, {dict(counts)}")
         return 0
+    if len(argv) == 6 and argv[0] == "picture" and all(a.isdigit() for a in argv[2:]):
+        print(picture(Path(argv[1]), *(int(a) for a in argv[2:])))
+        return 0
     print(__doc__, file=sys.stderr)
     return 2
+
+
+def picture(piece: Path, page_number: int, stave_index: int, first: int, last: int | None = None) -> Path:
+    """A PNG of bars `first` to `last` (counted on the page from 0) of one
+    drawn stave (from 0, top down), with room above and below for marks and
+    lyrics, written to library/<piece>/omr/views/bars/."""
+    import pymupdf
+    last = first if last is None else last
+    pdf = piece_pdfs(piece)[page_number - 1]
+    out = piece / "omr" / "views" / "bars" / f"page{page_number}-stave{stave_index}-bars{first}-{last}.png"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with pymupdf.open(pdf) as doc:
+        page = read_page(doc[0])
+        stave = page.staves[stave_index]
+        lines = page.bar_lines[stave_index]
+        clip = pymupdf.Rect(lines[first] - 4, stave.top - stave.gap * 7, lines[min(last + 1, len(lines) - 1)] + 4,
+                            stave.bottom + stave.gap * 7)
+        doc[0].get_pixmap(clip=clip, dpi=400).save(out)
+    return out
 
 
 if __name__ == "__main__":
