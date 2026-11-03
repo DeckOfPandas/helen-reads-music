@@ -36,6 +36,20 @@ Always, when "time" is known (from the score or merge.json):
   with no rest in such a bar gets one: Audiveris often writes the rest on
   the top staff only.
 
+  "drum_grooves": {"part": "Drum Set", "grooves": {"A": {
+        "up": "xG5:1 xG5:1/2 xG5:1/2 xG5+C5:1 xG5:1/2 xG5:1/2",
+        "down": "F4:1 r:1/2 F4:1/2 r:1 r:1"}}}
+      Audiveris misses x-headed notes above the stave (hi-hats, cymbals) and
+      misreads drum rhythms, but a kit part is mostly a few grooves. Each
+      groove is written once, a voice as space-separated <positions>:<length>
+      (positions like F4, xG5 for an x notehead, oxG5 for one with the open
+      mark of an open hi-hat, joined by + for notes struck together; r for
+      a rest; length in crotchets). It goes into the
+      bars it lists ("bars": [9, 10]), or else into every bar whose solid
+      notes (kick, snare) come in the same order as the groove's. The report
+      lists the bars each groove filled. Variations it cannot see (an open
+      hi-hat, a crash) are not detected.
+
   "borrow_rests": false
       Turns off borrow_rests, which process.py otherwise runs last: a short
       bar whose notes repeat a correct bar elsewhere (any part, any bar, same
@@ -358,6 +372,163 @@ def _divisions(measure: ET.Element, state: dict) -> Fraction | None:
     return Fraction(element.text) if element is not None else None
 
 
+# --- drum grooves ----------------------------------------------------------------
+
+def parse_groove_voice(text: str) -> list[tuple[list[tuple[str, int, bool, bool]], Fraction]]:
+    """"xG5:1 oxG5+C5:1/2 r:1" -> [([(step, octave, x-notehead, open), ...], crotchets)].
+    A position's leading x is an x notehead, o the open mark (an open
+    hi-hat); an empty list of positions is a rest."""
+    events = []
+    for token in text.split():
+        heads, _, length = token.rpartition(":")
+        if not heads or not length:
+            raise ValueError(f"drum groove token {token!r} is not <positions>:<length>")
+        positions = []
+        if heads != "r":
+            for head in heads.split("+"):
+                flags = ""
+                while head and head[0] in "xo":
+                    flags, head = flags + head[0], head[1:]
+                if len(head) < 2 or head[0] not in score.STEPS or not head[1:].isdigit():
+                    raise ValueError(f"drum groove position {head!r} is not like G5, xG5 or oxG5")
+                positions.append((head[0], int(head[1:]), "x" in flags, "o" in flags))
+        events.append((positions, Fraction(length)))
+    return events
+
+
+def _solid_sequence(measure: ET.Element) -> list[str]:
+    """Stave positions of the solid-headed drum notes, in reading order: the
+    kick and snare Audiveris reads, without the x-headed cymbals it misses.
+    Order, not timing, since its timing is what it gets wrong."""
+    hits = []
+    cursor = last = Fraction(0)
+    for element in measure:
+        if element.tag in ("backup", "forward"):
+            length = Fraction(element.findtext("duration") or 0)
+            cursor += -length if element.tag == "backup" else length
+            continue
+        if element.tag != "note":
+            continue
+        onset = last if element.find("chord") is not None else cursor
+        if element.find("chord") is None:
+            last = cursor
+            cursor += Fraction(element.findtext("duration") or 0)
+        if element.find("unpitched") is not None and element.findtext("notehead") != "x":
+            hits.append((onset, element.findtext("unpitched/display-step") +
+                         element.findtext("unpitched/display-octave")))
+    return [position for _, position in sorted(hits)]
+
+
+def _groove_solid_sequence(voices: list[list[tuple]]) -> list[str]:
+    hits = []
+    for events in voices:
+        onset = Fraction(0)
+        for positions, length in events:
+            hits += [(onset, f"{step}{octave}") for step, octave, cross, _ in positions if not cross]
+            onset += length
+    return [position for _, position in sorted(hits)]
+
+
+def _drum_notes(events: list[tuple], voice: str, stem: str, divisions: Fraction) -> list[ET.Element]:
+    notes = []
+    for positions, length in events:
+        ticks = length * divisions
+        if ticks.denominator != 1:
+            raise ValueError(f"drum groove length {length} does not fit divisions {divisions}")
+        heads = positions or [None]
+        for index, head in enumerate(heads):
+            note = ET.Element("note")
+            if index:
+                ET.SubElement(note, "chord")
+            if head is None:
+                ET.SubElement(note, "rest")
+            else:
+                unpitched = ET.SubElement(note, "unpitched")
+                ET.SubElement(unpitched, "display-step").text = head[0]
+                ET.SubElement(unpitched, "display-octave").text = str(head[1])
+            ET.SubElement(note, "duration").text = str(ticks.numerator)
+            ET.SubElement(note, "voice").text = voice
+            if length in NOTE_TYPES:
+                ET.SubElement(note, "type").text = NOTE_TYPES[length]
+            if head is not None:
+                ET.SubElement(note, "stem").text = stem
+                if head[2]:
+                    ET.SubElement(note, "notehead").text = "x"
+                if head[3]:
+                    technical = ET.SubElement(ET.SubElement(note, "notations"), "technical")
+                    ET.SubElement(technical, "open")
+            notes.append(note)
+    return notes
+
+
+def _wrap(time: ET.Element) -> ET.Element:
+    attributes = ET.Element("attributes")
+    attributes.append(copy.deepcopy(time))
+    return attributes
+
+
+def fill_drum_grooves(root: ET.Element, config: dict, expected: Fraction | None) -> list[str]:
+    """Write whole grooves into drum bars. Audiveris misses x-headed notes
+    above the stave (hi-hats, cymbals) and misreads drum rhythms, but a kit
+    part is mostly a few grooves repeated. Each groove is given once, as an
+    "up" voice (hands) and a "down" voice (feet); it goes into the bars it
+    lists, or, with no list, every bar whose solid-headed notes (the kick
+    and snare Audiveris does read) come in the same order as the groove's.
+    Variations it cannot see (an open hi-hat, a crash) are not detected."""
+    names = {name: pid for pid, name in score.part_names(root)}
+    part_name = config.get("part", "Drum Set")
+    if part_name not in names:
+        raise ValueError(f"drum_grooves names no part {part_name!r}")
+    part = next(p for p in root.findall("part") if p.get("id") == names[part_name])
+    grooves = {}
+    for name, spec in (config.get("grooves") or {}).items():
+        up, down = parse_groove_voice(spec.get("up", "")), parse_groove_voice(spec.get("down", ""))
+        for label, events in (("up", up), ("down", down)):
+            total = sum(length for _, length in events)
+            if events and expected is not None and total != expected:
+                raise ValueError(f"drum groove {name} {label} lasts {total} crotchets, the bar {expected}")
+        bars = {str(b) for b in spec["bars"]} if "bars" in spec else None
+        grooves[name] = (up, down, bars, _groove_solid_sequence([up, down]))
+
+    filled: dict[str, list[str]] = {name: [] for name in grooves}
+    states = merge.attribute_states(part)
+    for measure, state in zip(part.findall("measure"), states):
+        number = measure.get("number") or "?"
+        chosen = [n for n, (_, _, bars, _) in grooves.items() if bars is not None and number in bars]
+        if not chosen:
+            sequence = _solid_sequence(measure)
+            chosen = [n for n, (_, _, bars, solid) in grooves.items()
+                      if bars is None and sequence and sequence == solid]
+        if len(chosen) != 1:
+            continue
+        divisions = _divisions(measure, state)
+        if divisions is None:
+            continue
+        up, down, _, _ = grooves[chosen[0]]
+        own = [score._time_signature(a) for a in measure.findall("attributes")]
+        own = [t for t in own if t is not None]
+        in_force = own[-1] if own else (score._time_signature(_wrap(state[("time", "1")]))
+                                        if ("time", "1") in state else expected)
+        if in_force is not None and sum(l for _, l in up) != in_force:
+            continue
+        for element in [e for e in measure if e.tag in ("note", "backup", "forward")]:
+            measure.remove(element)
+        position = len(measure)
+        while position and measure[position - 1].tag == "barline":
+            position -= 1
+        new = _drum_notes(up, "1", "up", divisions)
+        if down:
+            backup = ET.Element("backup")
+            ET.SubElement(backup, "duration").text = str((sum(l for _, l in up) * divisions).numerator)
+            new.append(backup)
+            new += _drum_notes(down, "2", "down", divisions)
+        for offset, element in enumerate(new):
+            measure.insert(position + offset, element)
+        filled[chosen[0]].append(number)
+    return [f"{part_name}: groove {name} written into {len(bars)} bar(s): {', '.join(bars) or 'none'}"
+            for name, bars in filled.items()]
+
+
 def repair(root: ET.Element, config: dict) -> list[str]:
     report = []
     names = dict(score.part_names(root))
@@ -388,6 +559,10 @@ def repair(root: ET.Element, config: dict) -> list[str]:
     for name, kind in transpose.items():
         moved = write_transposition(parts[by_name[name]], kind, concert)
         report.append(f"{name}: transposing in {kind}" + (f"; {moved} key(s) moved to the written key" if moved else ""))
+
+    if config.get("drum_grooves"):
+        expected = score.parse_time(time) if time else None
+        report += fill_drum_grooves(root, config["drum_grooves"], expected)
 
     resized = added = 0
     for part in parts.values():

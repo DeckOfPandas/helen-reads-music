@@ -191,6 +191,97 @@ def test_no_rests_are_borrowed_when_matching_bars_disagree_where():
     assert _events(root.findall("part")[1]).count("r") == 1
 
 
+GROOVE = {"up": "xG5:1 xG5:1/2 xG5:1/2 xG5+C5:1 xG5:1/2 xG5:1/2",
+          "down": "F4:1 r:1/2 F4:1/2 r:1 r:1"}
+
+
+def drum_bar(number: int, hits: list[tuple], first: bool = False) -> str:
+    """A bar the way Audiveris reads a kit: kick line in voice 1 (the second
+    kick a crotchet, not a quaver: 4.5 crotchets), snare alone in voice 2."""
+    attrs = ("<attributes><divisions>2</divisions><time><beats>4</beats><beat-type>4</beat-type></time>"
+             "<clef><sign>percussion</sign></clef></attributes>") if first else ""
+    notes = ""
+    for step, octave, ticks, voice in hits:
+        if step == "back":
+            notes += f"<backup><duration>{ticks}</duration></backup>"
+        elif step == "fwd":
+            notes += f"<forward><duration>{ticks}</duration><voice>{voice}</voice></forward>"
+        elif step == "r":
+            notes += f"<note><rest/><duration>{ticks}</duration><voice>{voice}</voice></note>"
+        else:
+            notes += (f"<note><unpitched><display-step>{step}</display-step><display-octave>{octave}"
+                      f"</display-octave></unpitched><duration>{ticks}</duration><voice>{voice}</voice></note>")
+    return f'<measure number="{number}">{attrs}{notes}</measure>'
+
+
+MISREAD_GROOVE = [("F", 4, 2, 1), ("r", 0, 1, 1), ("F", 4, 2, 1), ("r", 0, 2, 1), ("r", 0, 2, 1),
+                  ("back", 0, 9, 0), ("fwd", 0, 5, 2), ("C", 5, 2, 2)]
+KICK_ONLY = [("F", 4, 2, 1), ("r", 0, 6, 1)]
+
+
+def test_a_drum_groove_fills_the_bars_whose_kick_and_snare_match():
+    drums = f'<part id="P1">{drum_bar(1, MISREAD_GROOVE, True)}{drum_bar(2, KICK_ONLY)}{drum_bar(3, MISREAD_GROOVE)}</part>'
+    root = build([("P1", "Drum Set", drums)])
+    assert [b.number for b in score.bad_bars(root.find("part"))] == ["1", "3"]
+    report = repair.repair(root, {"drum_grooves": {"grooves": {"A": GROOVE}}})
+    assert "Drum Set: groove A written into 2 bar(s): 1, 3" in report
+    part_element = root.find("part")
+    assert [b.number for b in score.bad_bars(part_element)] == []
+    bar1 = part_element.findall("measure")[0]
+    assert bar1.find("attributes/clef/sign").text == "percussion"
+    hats = [n for n in bar1.findall("note") if n.findtext("notehead") == "x"]
+    assert len(hats) == 6 and all(n.findtext("unpitched/display-step") == "G" for n in hats)
+    snare = [n for n in bar1.findall("note") if n.find("chord") is not None]
+    assert [n.findtext("unpitched/display-step") for n in snare] == ["C"]
+    kicks = [n for n in bar1.findall("note") if n.findtext("voice") == "2" and n.find("unpitched") is not None]
+    assert [n.findtext("duration") for n in kicks] == ["2", "1"]
+    # The kick-only bar does not match and is left as read.
+    assert len(part_element.findall("measure")[1].findall("note")) == 2
+
+
+def test_a_groove_goes_into_listed_bars_whatever_they_hold():
+    drums = f'<part id="P1">{drum_bar(1, KICK_ONLY, True)}{drum_bar(2, KICK_ONLY)}</part>'
+    root = build([("P1", "Drum Set", drums)])
+    report = repair.repair(root, {"drum_grooves": {"grooves": {"A": {**GROOVE, "bars": [2]}}}})
+    assert "Drum Set: groove A written into 1 bar(s): 2" in report
+
+
+def test_a_groove_that_does_not_fill_the_bar_is_refused():
+    drums = f'<part id="P1">{drum_bar(1, MISREAD_GROOVE, True)}</part>'
+    root = build([("P1", "Drum Set", drums)])
+    with pytest.raises(ValueError, match="lasts 7/2"):
+        repair.repair(root, {"time": "4/4", "drum_grooves": {"grooves": {"A": {
+            "up": "xG5:1 xG5:1/2 xG5+C5:1 xG5:1/2 xG5:1/2", "down": GROOVE["down"]}}}})
+
+
+def test_a_groove_never_goes_into_a_bar_of_another_length():
+    three_four = ('<measure number="2"><attributes><time><beats>3</beats><beat-type>4</beat-type></time>'
+                  "</attributes>" + drum_bar(9, MISREAD_GROOVE)[len('<measure number="9">'):])
+    drums = f'<part id="P1">{drum_bar(1, KICK_ONLY, True)}{three_four}</part>'
+    root = build([("P1", "Drum Set", drums)])
+    report = repair.repair(root, {"drum_grooves": {"grooves": {"A": GROOVE}}})
+    assert "Drum Set: groove A written into 0 bar(s): none" in report
+
+
+def test_an_open_hi_hat_gets_the_open_mark_and_listed_bars_win_over_matching():
+    open_groove = {"up": "xG5:1 xG5:1/2 xG5:1/2 xG5+C5:1 oxG5:1", "down": GROOVE["down"], "bars": [2]}
+    drums = f'<part id="P1">{drum_bar(1, MISREAD_GROOVE, True)}{drum_bar(2, MISREAD_GROOVE)}</part>'
+    root = build([("P1", "Drum Set", drums)])
+    report = repair.repair(root, {"drum_grooves": {"grooves": {"A": GROOVE, "A open": open_groove}}})
+    assert "Drum Set: groove A written into 1 bar(s): 1" in report
+    assert "Drum Set: groove A open written into 1 bar(s): 2" in report
+    bar2 = root.find("part").findall("measure")[1]
+    opened = [n for n in bar2.findall("note") if n.find("notations/technical/open") is not None]
+    assert len(opened) == 1 and opened[0].findtext("notehead") == "x" and opened[0].findtext("type") == "quarter"
+    assert score.bad_bars(root.find("part")) == []
+
+
+@pytest.mark.parametrize("token", ["xG5", "Q5:1", "xG:1", "oxQ5:1"])
+def test_bad_groove_tokens_are_refused(token):
+    with pytest.raises(ValueError):
+        repair.parse_groove_voice(token)
+
+
 @pytest.mark.parametrize("config", [{"transpose": {"Nobody": "Bb"}}, {"transpose": {"Flute": "H"}},
                                     {"time": "four"}])
 def test_bad_config_is_refused(config):
