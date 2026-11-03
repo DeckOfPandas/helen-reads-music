@@ -60,12 +60,17 @@ On a score of several pages Audiveris makes one instrument into many parts,
 one per page or per name it read. Which parts are one instrument is your
 call:
 
-1. Read `omr/names.txt` (the primary read's parts) beside the score's own
-   list of instruments.
-2. Copy `omr/merge.template.json` to `library/<piece>/merge.json`. List the
-   real instruments in `canonical_order` and map each part to one of them, by
-   name, or by part id (`"P23": "Marimba"`) where one name covers several
-   staves or OCR garbled it.
+1. `process.py` drafts it: `omr/merge.draft.json` (`draft.py`). The page
+   with the most staves sets the instruments and their order; every other
+   page's parts are matched to them in order, by name (forgiving OCR), clef
+   and number of staves; each instrument is named by a vote of its parts.
+   It also proposes `time`, `transpose` (from "in Bb", "in F", piccolo,
+   basses), `octave_clefs` and lost `key_changes`. Its `_check` list is
+   every part it placed by position alone, or whose name disagreed.
+2. Check that list against the score and `omr/names.txt` (the primary
+   read's parts). Map a part by name, or by part id (`"P23": "Marimba"`)
+   where one name covers several staves; an id wins over its name. Save as
+   `library/<piece>/merge.json`.
 3. Run `process.py` again. Audiveris is not run again.
 
 `merge.json` also carries the repairs (`repair.py --help`):
@@ -99,6 +104,7 @@ bar the two reads got right but differently. Those are the bars to look at.
 | `audiveris.py` | Runs Audiveris headless, state in `tmp/audiveris-home/` |
 | `pages.py` | `merge`, `images`, `rerender`, `split`: getting pages into one readable PDF |
 | `score.py` | `check` and `names` for any `.mxl` |
+| `draft.py` | Drafts `merge.json` from a read |
 | `merge.py` | The merge, on its own |
 | `repair.py` | The repairs, on their own |
 | `combine.py` | Matching the second read and filling bars from it |

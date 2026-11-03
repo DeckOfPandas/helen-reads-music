@@ -77,9 +77,10 @@ def test_a_pdf_piece_is_read_and_reported(tmp_path):
     report = (out / "report.txt").read_text()
     assert "bar 2: 3 crotchets of 4 crotchets (short)" in report
     assert (out / "names.txt").read_text() == "P1 | Fl.\nP2 | Flute\n"
-    template = json.loads((out / "merge.template.json").read_text())
-    assert template["aliases"] == {"Fl.": None, "Flute": None}
-    assert notes[-1] == "2 parts; bars that do not add up: 1 of 4 checked"
+    drafted = json.loads((out / "merge.draft.json").read_text())
+    assert drafted["aliases"] == {"Fl.": "Flute I", "Flute": "Flute II"}      # two flute staves, both printed
+    assert "2 parts; bars that do not add up: 1 of 4 checked" in notes
+    assert "merge.draft.json" in notes[-1]
 
 
 def test_a_low_interline_is_re_rendered_and_read_again(tmp_path):

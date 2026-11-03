@@ -29,7 +29,10 @@ Everything made goes in library/<piece>/omr/:
   <piece>.omr                   Audiveris's own book, to open in its editor
   report.txt                    score.py check: parts, and bars that do not add up
   names.txt                     every part name Audiveris gave
-  merge.template.json           a table to fill in (see merge.py)
+  merge.draft.json              merge.json drafted from the read (draft.py): which
+                                parts are which instrument, in what order,
+                                transposed how; its "_check" list is what it
+                                was unsure of
   <piece>-merged.mxl            once library/<piece>/merge.json exists: merged,
                                 then repaired (repair.py: time signature,
                                 transposition, whole-bar rests)
@@ -60,6 +63,7 @@ from pathlib import Path
 
 import audiveris
 import combine
+import draft
 import merge
 import pages
 import repair
@@ -232,17 +236,13 @@ def process(piece: Path, force: bool = False, run=audiveris.run,
     (out / "report.txt").write_text("\n".join(report) + "\n", encoding="utf-8")
     names = score.part_names(score.load(mxl))
     (out / "names.txt").write_text("".join(f"{pid} | {n}\n" for pid, n in names), encoding="utf-8")
-    template = {
-        "_help": ("List the real instruments in score order in canonical_order, and set each "
-                  "name in aliases to one of them (null leaves it its own part). Where one "
-                  "name covers different staves (often 'Voice'), add keys by part id from "
-                  "names.txt, e.g. \"P23\": \"Marimba\"; an id wins over its name. Save as "
-                  f"library/{piece.name}/merge.json and run process.py again."),
-        "canonical_order": [],
-        "aliases": {n: None for _, n in names},
-    }
-    (out / "merge.template.json").write_text(json.dumps(template, indent=2) + "\n", encoding="utf-8")
+    drafted, draft_report = draft.draft(score.load(mxl))
+    (out / "merge.draft.json").write_text(json.dumps(drafted, indent=2, ensure_ascii=False) + "\n",
+                                          encoding="utf-8")
     notes.append(f"{len(names)} parts; {report[-1]}")
+    if not config.is_file():
+        notes.append(f"{draft_report[0]}: omr/merge.draft.json; check its _check list, then save it as "
+                     f"library/{piece.name}/merge.json and run process.py again")
 
     if config.is_file():
         merged = out / f"{name}-merged.mxl"
