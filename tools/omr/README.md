@@ -118,7 +118,9 @@ call:
 did, then checks the result: every bar whose notes and rests do not add up
 to the time signature, every note below its instrument's range, and every
 bar the two reads got right but differently. Those are the bars to look at.
-`omr/<piece>-merged.mxl` is the file to open.
+`omr/<piece>-merged.mxl` is the file to open; `omr/<piece>-merged.musicxml`
+is the same score uncompressed, for Sibelius or anything that wants plain
+MusicXML.
 
 Before changing a tool or `merge.json`, copy the merged score aside; after,
 `score.py diff <copy> <new>` lists every bar whose notes or marks (lyrics,

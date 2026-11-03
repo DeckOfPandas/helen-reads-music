@@ -65,6 +65,12 @@ def load(path: Path | str) -> ET.Element:
     return ET.fromstring(path.read_bytes())
 
 
+DOCTYPES = {
+    "score-partwise": '<!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML 4.0 Partwise//EN" '
+                      '"http://www.musicxml.org/dtds/partwise.dtd">',
+}
+
+
 def save(root: ET.Element, out: Path | str, like: Path | str | None = None) -> None:
     """Write `root` to `out` (.mxl or plain XML). For .mxl, every other member
     of `like` (container, images) is copied across. Written to a side file and
@@ -73,6 +79,9 @@ def save(root: ET.Element, out: Path | str, like: Path | str | None = None) -> N
     xml_bytes = ET.tostring(root, encoding="UTF-8", xml_declaration=True)
     tmp = out.with_name(out.name + ".partial")
     if out.suffix.lower() != ".mxl":
+        if root.tag in DOCTYPES:                # a plain file says what it is, for notation software
+            declaration, rest = xml_bytes.split(b"\n", 1)
+            xml_bytes = declaration + b"\n" + DOCTYPES[root.tag].encode() + b"\n" + rest
         tmp.write_bytes(xml_bytes)
     else:
         with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout:

@@ -36,6 +36,8 @@ Everything made goes in library/<piece>/omr/:
   <piece>-merged.mxl            once library/<piece>/merge.json exists: merged,
                                 then repaired (repair.py: time signature,
                                 transposition, whole-bar rests)
+  <piece>-merged.musicxml       the same, uncompressed, for notation software
+                                that wants plain MusicXML
   merge-report.txt              what the merge and repairs did, or why the merge
                                 refused; how the second read was matched and
                                 which bars came from it; what the PDF's drawing
@@ -286,6 +288,7 @@ def process(piece: Path, force: bool = False, run=audiveris.run,
                 return False, notes + [f"merge.json: {err}"]
             merge_report += repair.fix_labels_and_sounds(root, labels)
             score.save(root, merged, like=merged)
+            score.save(root, merged.with_suffix(".musicxml"))
             check = score.check(merged, assume_time)
             merge_report += ["", *check]
             notes.append(f"merged and repaired with merge.json -> {merged.name}; {check[-1]}")

@@ -7,8 +7,9 @@ description: Turn a sheet-music PDF (or scans or photos of pages) in library/<pi
 
 The tools are in `tools/omr/`; `tools/omr/README.md` explains each step and
 each `--help` gives the details. This skill is the order to work in, and the
-judgement calls. The goal: a `<piece>-merged.mxl` that Helen can open in
-Sibelius with every bar as printed. Derive everything from the page. Patch by
+judgement calls. The goal: a `<piece>-merged.mxl` (and the same as plain
+`<piece>-merged.musicxml`) that Helen can open in Sibelius with every bar
+as printed. Derive everything from the page. Patch by
 hand only what no tool can read, and never guess.
 
 ## Ground rules
