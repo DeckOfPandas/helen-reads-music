@@ -13,8 +13,8 @@ is the only enforcement.
   Tell me which.
 - **Scratch files go in this project's `tmp/`** (gitignored), never the system
   `/tmp`, never `~`.
-- Tests: `python3 -m pytest -q`. Read a piece of music:
-  `python3 tools/omr/process.py library/<piece>` (see `tools/omr/README.md`).
+- Tests: `python3 -m pytest -q`. Read a piece of music: the
+  `read-sheet-music` skill has the steps (`tools/omr/README.md` the tools).
 - **Show me a branch on a server; never ask me to pull and build.** Read
   `PORTS` in `.devcontainer/kit.env` (`host:container` pairs), run `ss -ltn`
   and take a free container port, serve your own worktree in the background on

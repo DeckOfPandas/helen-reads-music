@@ -4,6 +4,7 @@
 USAGE (from the repo root):
     python3 tools/omr/score.py check <score.mxl> [<score.mxl> ...] [--time 4/4]
     python3 tools/omr/score.py names <score.mxl>
+    python3 tools/omr/score.py diff <old.mxl> <new.mxl>
 
 check   Per part: bars, notes, rests, octave range, whether it carries a
         <transpose> (a part without one is read as concert pitch), and every
@@ -17,6 +18,10 @@ check   Per part: bars, notes, rests, octave range, whether it carries a
         Also every bar with a note below the instrument's lowest written
         note (by its part name): usually a stave read an octave low.
 names  Every part name, in score order: the raw material for a merge config.
+diff   Every bar, per part (matched by name), whose notes or marks differ
+       between two versions: lyrics, articulations, noteheads, directions.
+       Save the merged score before changing a tool or merge.json, run
+       again, and diff: what changed is what to look at.
 
 This reads structure, not notation: it says where to look, it is not a
 proofread.
@@ -27,6 +32,7 @@ import os
 import sys
 import xml.etree.ElementTree as ET
 import zipfile
+from collections import Counter
 from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
@@ -302,6 +308,86 @@ def check(path: Path | str, assume: Fraction | None = None) -> list[str]:
     return lines
 
 
+# --- comparing two versions -------------------------------------------------------
+
+def _bar_contents(measure: ET.Element, divisions: Fraction) -> tuple[list[tuple], Counter, Fraction]:
+    """(notes, marks, divisions after the bar): notes as (voice, staff,
+    onset, what, length, ties), sorted; marks as a count of lyrics,
+    articulations, noteheads and directions."""
+    time = last = Fraction(0)
+    notes, marks = [], Counter()
+    for element in measure:
+        if element.tag == "attributes" and element.findtext("divisions"):
+            divisions = Fraction(element.findtext("divisions"))
+        elif element.tag in ("backup", "forward"):
+            step = Fraction(element.findtext("duration") or 0) / divisions
+            time += step if element.tag == "forward" else -step
+        elif element.tag == "direction":
+            for kind in element.findall("direction-type/*"):
+                text = (kind.text or "").strip()
+                marks[" ".join(["direction", kind.tag, text] + [c.tag for c in kind]).strip()] += 1
+        elif element.tag == "note" and element.find("grace") is None:
+            length = Fraction(element.findtext("duration") or 0) / divisions
+            onset = last if element.find("chord") is not None else time
+            if element.find("pitch") is not None:
+                what = "".join(element.findtext(f"pitch/{k}") or "" for k in ("step", "alter", "octave"))
+            elif element.find("unpitched") is not None:
+                what = "".join(element.findtext(f"unpitched/{k}") or "" for k in ("display-step", "display-octave"))
+            else:
+                what = "rest" + (" hidden" if element.get("print-object") == "no" else "")
+            ties = "".join(sorted(t.get("type") for t in element.findall("tie")))
+            notes.append((element.findtext("voice") or "1", element.findtext("staff") or "1", onset, what,
+                          length, ties))
+            if element.find("chord") is None:
+                last, time = time, time + length
+            for lyric in element.findall("lyric"):
+                marks[f"lyric {lyric.findtext('text') or ''}"] += 1
+            for mark in element.findall("notations/articulations/*") + element.findall("notations/ornaments/*"):
+                marks[mark.tag] += 1
+            if element.findtext("notehead"):
+                marks[f"notehead {element.findtext('notehead')}"] += 1
+    return sorted(notes), marks, divisions
+
+
+def diff(old_path: Path | str, new_path: Path | str) -> list[str]:
+    """Every bar, per part, whose notes (pitch, onset, length, ties, voice)
+    or marks (lyrics, articulations, noteheads, directions) differ between
+    two versions of a score, parts matched by name."""
+    def bars(path):
+        root = load(path)
+        out = {}
+        for (_, name), part in zip(part_names(root), root.findall("part")):
+            divisions, per_bar = Fraction(1), {}
+            for measure in part.findall("measure"):
+                notes, marks, divisions = _bar_contents(measure, divisions)
+                per_bar[measure.get("number")] = (notes, marks)
+            out[name] = per_bar
+        return out
+
+    def show(items) -> str:
+        return ", ".join(str(i) for i in items) or "-"
+
+    old, new = bars(old_path), bars(new_path)
+    lines, changed = [], 0
+    for name in new:
+        if name not in old:
+            lines.append(f"{name}: only in the new score")
+            continue
+        for number, (notes, marks) in new[name].items():
+            before_notes, before_marks = old[name].get(number, ([], Counter()))
+            if notes != before_notes:
+                changed += 1
+                lines.append(f"{name} bar {number} notes: old {show(n for n in before_notes if n not in notes)}; "
+                             f"new {show(n for n in notes if n not in before_notes)}")
+            if marks != before_marks:
+                changed += 1
+                lines.append(f"{name} bar {number} marks: old {show((before_marks - marks).elements())}; "
+                             f"new {show((marks - before_marks).elements())}")
+    lines += [f"{name}: only in the old score" for name in old if name not in new]
+    lines.append(f"{changed} difference(s)")
+    return lines
+
+
 def main(argv: list[str]) -> int:
     assume = None
     if "--time" in argv:
@@ -312,9 +398,15 @@ def main(argv: list[str]) -> int:
             print(__doc__, file=sys.stderr)
             return 2
         argv = argv[:at] + argv[at + 2:]
-    if len(argv) < 2 or argv[0] not in ("check", "names"):
+    if len(argv) < 2 or argv[0] not in ("check", "names", "diff"):
         print(__doc__, file=sys.stderr)
         return 2
+    if argv[0] == "diff":
+        if len(argv) != 3:
+            print(__doc__, file=sys.stderr)
+            return 2
+        print("\n".join(diff(argv[1], argv[2])))
+        return 0
     if argv[0] == "names":
         if len(argv) != 2:
             print(__doc__, file=sys.stderr)

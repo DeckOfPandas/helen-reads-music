@@ -2,7 +2,8 @@
 
 Sheet-music PDFs to MusicXML with Audiveris, which the image carries when
 `WITH_AUDIVERIS=1`. Every score and everything made from one stays in the
-gitignored `library/`.
+gitignored `library/`. The steps for reading a new piece, in order, are in
+the `read-sheet-music` skill (`.claude/skills/read-sheet-music/SKILL.md`).
 
     python3 tools/omr/process.py library/<piece>          # read a piece
     python3 tools/omr/process.py library/<piece> --force  # read it again
@@ -42,8 +43,10 @@ reading adds up and differs from the score, it wins:
 
 - the key drawn after each clef, or at a bar line, is the key;
 - a stave's bar with a wrong note, a lost note or wrong rhythm is replaced
-  by the drawing's reading (lyrics kept where the notes line up, dynamics
-  kept at their beat);
+  by the drawing's reading, x and slash heads as drawn; each lyric moves to
+  the new note at its place on the page, and dynamics keep their beat;
+- an accent, marcato, tenuto or staccato goes to the nearest notehead, even
+  one on the next stave;
 - rests missing from an otherwise right bar are put back;
 - ties are set as drawn;
 - a fingered tremolo (two minims a beam's strokes apart, together lasting
@@ -52,9 +55,14 @@ reading adds up and differs from the score, it wins:
   leaves without rests padded with invisible ones.
 
 A bar whose drawing does not add up (tuplets, grace notes) is reported, not
-changed. Bars patched by hand are left alone; after the patches they are
-checked against the drawing, and only their ties are corrected. A scanned
-PDF has no drawing, and no `glyphs.json` means no check.
+changed. Text is drawn as shapes too, and not read: lyrics are what
+Audiveris read. Bars patched by hand are left alone; after the patches they
+are checked against the drawing, and only their ties are corrected. A
+scanned PDF has no drawing, and no `glyphs.json` means no check.
+
+To check a bar by eye, `vector.py picture library/<piece> <page> <stave>
+<first bar> <last bar>` writes a PNG of it to `omr/views/bars/`.
+`merge-report.txt` says which stave is which part on each page.
 
 ## Doublings
 
@@ -96,7 +104,7 @@ call:
 | `"transpose": {"Clarinet in Bb": "Bb"}` | Marks transposing instruments (Bb, A, F, Eb, 8va, 8vb) and gives them their written key |
 | `"octave_clefs": false` | The score has no octave clefs: undoes treble clefs Audiveris read as "8 below" |
 | `"key_changes": {"125": 0}` | A key change Audiveris read but failed to export: writes it into the parts that lack it and respells the notes the old key altered |
-| `"patches": {"Oboe": {"121": "1/2 1/2 +r:1/2 ..."}}` | Hand corrections to single bars, applied last: edit the existing notes (lengths, re-pitch, insert, delete) so lyrics and marks survive, or replace a voice; fingered tremolos as `F4+Bb4/D5:2`; see `repair.py --help` |
+| `"patches": {"Oboe": {"121": "1/2 1/2 +r:1/2 ..."}}` | Hand corrections to single bars, for what no tool reads (a tuplet, a grace note, a word Audiveris missed), applied last: edit the existing notes (lengths, re-pitch, insert, delete) so lyrics and marks survive, or replace a voice; fingered tremolos as `F4+Bb4/D5:2`; see `repair.py --help` |
 | `"vocal_parts": ["Voice"]` | Parts whose lyrics are lyrics; elsewhere dynamics, accents and instructions Audiveris read as lyrics become marks again (the default is just "Voice") |
 | `"drum_key": {"F5 x": 51}` | Extra drum sounds by stave position and notehead; every drum note gets its instrument, hands stems up, feet stems down |
 | `"drum_grooves": {...}` | Writes whole kit grooves (hi-hats included, which Audiveris misses) into the bars whose kick and snare match, or into listed bars; see `repair.py --help` |
@@ -112,6 +120,10 @@ to the time signature, every note below its instrument's range, and every
 bar the two reads got right but differently. Those are the bars to look at.
 `omr/<piece>-merged.mxl` is the file to open.
 
+Before changing a tool or `merge.json`, copy the merged score aside; after,
+`score.py diff <copy> <new>` lists every bar whose notes or marks (lyrics,
+articulations, noteheads, directions) changed.
+
 ## The tools
 
 | File | Does |
@@ -119,12 +131,12 @@ bar the two reads got right but differently. Those are the bars to look at.
 | `process.py` | The whole run for a piece |
 | `audiveris.py` | Runs Audiveris headless, state in `tmp/audiveris-home/` |
 | `pages.py` | `merge`, `images`, `rerender`, `split`: getting pages into one readable PDF |
-| `score.py` | `check` and `names` for any `.mxl` |
+| `score.py` | `check`, `names` and `diff` for any `.mxl` |
 | `draft.py` | Drafts `merge.json` from a read |
 | `merge.py` | The merge, on its own |
 | `repair.py` | The repairs, on their own |
 | `combine.py` | Matching the second read and filling bars from it |
-| `vector.py` | The PDF's drawing: staves, bar lines, stems, named shapes; `survey` makes `glyphs.json` |
+| `vector.py` | The PDF's drawing: staves, bar lines, stems, named shapes; `survey` makes `glyphs.json`, `picture` shows bars |
 | `vector_read.py` | One bar of one stave read from the drawing: notes, lengths, ties, voices, pitches |
 | `drawing_check.py` | The score checked and corrected against the drawing |
 | `doublings.py` | Parts that double each other, filling each other's broken bars |

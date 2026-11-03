@@ -129,6 +129,23 @@ def test_save_round_trips_and_keeps_other_members(tmp_path):
     assert not list(tmp_path.glob("*.partial"))
 
 
+def test_diff_lists_bars_whose_notes_or_lyrics_changed(tmp_path):
+    def version(name, third_bar, lyric=""):
+        bars = [bar(four_crotchets(), 1, attributes()), bar(four_crotchets(), 2), bar(third_bar, 3)]
+        xml = make_score([("P1", "Flute", part("P1", bars))])
+        if lyric:
+            xml = xml.replace("</note>", f"<lyric><text>{lyric}</text></lyric></note>", 1)
+        return write_mxl(tmp_path / name, xml)
+
+    old = version("old.mxl", four_crotchets())
+    new = version("new.mxl", [("C4", 2), ("C4", 2)], lyric="la")
+    lines = score.diff(old, new)
+    assert lines[0] == "Flute bar 1 marks: old -; new lyric la"
+    assert lines[1].startswith("Flute bar 3 notes:")
+    assert lines[2:] == ["2 difference(s)"]
+    assert score.diff(old, old) == ["0 difference(s)"]
+
+
 def test_cli_names(tmp_path, capsys):
     mxl = write_mxl(tmp_path / "s.mxl", make_score([("P1", "Fl.", part("P1", [])), ("P2", "Ob.", part("P2", []))]))
     assert score.main(["names", str(mxl)]) == 0
