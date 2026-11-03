@@ -52,7 +52,8 @@ def test_a_whole_bar_rest_takes_the_bar_length():
     root = build([("P1", "Bsn.", part("P1", [rest_bar(1, 18, untimed())]))])
     report = repair.repair(root, {"time": "4/4"})
     assert root.find("part/measure/note/duration").text == "16"
-    assert report[-1] == "whole-bar rests: 1 set to a full bar, 0 added to empty staves"
+    assert report[-1] == ("whole-bar rests: 1 set to a full bar, 0 added to empty staves, "
+                          "0 fitted to the bar beside notes in another voice")
     assert score.bad_bars(root.find("part")) == []
 
 
@@ -65,7 +66,25 @@ def test_an_empty_lower_staff_gets_its_rest():
     assert lower.findtext("staff") == "2" and lower.findtext("duration") == "16"
     assert lower.find("rest").get("measure") == "yes" and lower.findtext("voice") == "5"
     assert lower.find("rest/display-step") is None
-    assert report[-1] == "whole-bar rests: 0 set to a full bar, 1 added to empty staves"
+    assert report[-1] == ("whole-bar rests: 0 set to a full bar, 1 added to empty staves, "
+                          "0 fitted to the bar beside notes in another voice")
+    assert score.bad_bars(root.find("part")) == []
+
+
+def test_a_silent_lower_staff_rest_beside_notes_takes_the_bar_length():
+    # Piano: notes on top, the left hand's whole-bar rest read at 4.5 crotchets.
+    measure = ('<measure number="1">' + untimed(staves=2)
+               + "".join(f"<note><pitch><step>C</step><octave>5</octave></pitch><duration>4</duration>"
+                         f"<voice>1</voice><staff>1</staff></note>" for _ in range(4))
+               + "<backup><duration>16</duration></backup>" + measure_rest(18, staff=2).replace(
+                   "<voice>1</voice>", "<voice>5</voice>")
+               + "<backup><duration>18</duration></backup></measure>")
+    root = build([("P1", "Piano", f'<part id="P1">{measure}</part>')])
+    report = repair.repair(root, {"time": "4/4"})
+    assert report[-1].endswith("1 fitted to the bar beside notes in another voice")
+    bar = root.find("part/measure")
+    assert [n.findtext("duration") for n in bar.findall("note")][-1] == "16"
+    assert [e.tag for e in bar][-1] == "note"                 # the dangling backup is gone
     assert score.bad_bars(root.find("part")) == []
 
 
@@ -280,6 +299,202 @@ def test_an_open_hi_hat_gets_the_open_mark_and_listed_bars_win_over_matching():
 def test_bad_groove_tokens_are_refused(token):
     with pytest.raises(ValueError):
         repair.parse_groove_voice(token)
+
+
+def _timed_part(pid, name, events, extra=""):
+    return (pid, name, part(pid, [bar(events, 1, attributes() + extra)]))
+
+
+def _durations(measure, voice="1"):
+    return [(n.findtext("pitch/step") or "r", n.findtext("duration"), n.findtext("type"), len(n.findall("dot")))
+            for n in measure.findall("note") if (n.findtext("voice") or "1") == voice]
+
+
+def test_a_patch_edit_puts_back_missing_rests_and_keeps_the_notes():
+    # Piccolo bar 44: crotchet rest, two quavers, rest, quaver, (missing rest), quaver.
+    events = [("r", 1), ("D5", 0.5), ("D5", 0.5), ("r", 0.5), ("F5", 0.5), ("D5", 0.5)]
+    root = build([_timed_part("P1", "Piccolo", events)])
+    note = root.find(".//note[2]")
+    ET.SubElement(note, "notations").append(ET.Element("staccato"))
+    report = repair.apply_patches(root, {"Piccolo": {"1": "1 1/2 1/2 1/2 1/2 +r:1/2 1/2"}})
+    assert report == ["Piccolo bar 1: patched"]
+    measure = root.find("part/measure")
+    assert [d[0] for d in _durations(measure)] == ["r", "D", "D", "r", "F", "r", "D"]
+    assert measure.find("note[2]/notations/staccato") is not None      # kept
+    assert score.bad_bars(root.find("part")) == []
+
+
+def test_a_patch_edit_fixes_a_dotted_misread_and_drops_stray_gaps():
+    # Trumpet bar 3: C5 read dotted, then a forward, rest dropped.
+    measure = ('<measure number="1">' + attributes()
+               + "".join(f"<note><pitch><step>{s}</step><octave>{o}</octave></pitch><duration>{d}</duration>"
+                         f"<voice>1</voice><type>eighth</type>{'<dot/>' if d == 3 else ''}</note>"
+                         for s, o, d in (("C", 4, 2), ("E", 4, 2), ("G", 4, 2), ("C", 5, 3)))
+               + "<forward><duration>1</duration></forward>"
+               + "".join(f"<note><pitch><step>{s}</step><octave>{o}</octave></pitch><duration>2</duration>"
+                         f"<voice>1</voice><type>eighth</type></note>" if s != "r" else
+                         "<note><rest/><duration>2</duration><voice>1</voice><type>eighth</type></note>"
+                         for s, o in (("C", 5), ("r", 0), ("D", 4)))
+               + "</measure>")
+    root = build([("P1", "Trumpet", f'<part id="P1">{measure}</part>')])
+    repair.apply_patches(root, {"Trumpet": {"1": "1/2 1/2 1/2 1/2 +r:1/2 1/2 1/2 1/2"}})
+    m = root.find("part/measure")
+    assert m.find("forward") is None
+    assert [d[:2] for d in _durations(m)] == [("C", "2"), ("E", "2"), ("G", "2"), ("C", "2"), ("r", "2"),
+                                              ("C", "2"), ("r", "2"), ("D", "2")]
+    assert all(d[3] == 0 for d in _durations(m))                        # the stray dot is gone
+
+
+def test_a_patch_inserts_a_tied_note_with_its_lyric():
+    events = [("r", 4)]
+    root = build([_timed_part("P1", "Voice", events)])
+    repair.apply_patches(root, {"Voice": {"1": "2 +G5:2~@Yeah,"}})
+    notes = root.find("part/measure").findall("note")
+    assert [n.findtext("duration") for n in notes] == ["8", "8"]
+    g = notes[1]
+    assert g.findtext("pitch/step") == "G" and g.findtext("pitch/octave") == "5"
+    assert g.find("tie").get("type") == "start" and g.find("notations/tied").get("type") == "start"
+    assert g.findtext("lyric/text") == "Yeah,"
+    assert [c.tag for c in g] == ["pitch", "duration", "tie", "voice", "type", "notations", "lyric"]
+
+
+def test_a_patch_can_tie_from_the_bar_before_and_spell_accidentals():
+    root = build([_timed_part("P1", "Voice", [("E5", 0.5), ("D5", 0.5), ("C5", 1)])])
+    repair.apply_patches(root, {"Voice": {"1": "+~G5:2 1/2 1/2 1"}})
+    first = root.find("part/measure/note")
+    assert first.find("tie").get("type") == "stop"
+    root = build([_timed_part("P1", "Oboe", [("C5", 4)])])
+    repair.apply_patches(root, {"Oboe": {"1": {"notes": "Bb4:1 F#5:1 Bn4:1 r:1"}}})
+    alters = [n.findtext("pitch/alter") for n in root.iter("note") if n.find("pitch") is not None]
+    assert alters == ["-1", "1", None]
+
+
+def test_a_patch_replaces_a_tangled_bar_and_its_other_voices():
+    bars = ('<measure number="1">' + attributes()
+            + "<note><pitch><step>A</step><octave>4</octave></pitch><duration>8</duration><voice>1</voice></note>"
+            + "<note><pitch><step>F</step><octave>5</octave></pitch><duration>8</duration><voice>1</voice></note>"
+            + "<backup><duration>16</duration></backup>"
+            + "<note><rest/><duration>8</duration><voice>3</voice></note></measure>")
+    root = build([("P1", "Marimba", f'<part id="P1">{bars}</part>')])
+    repair.apply_patches(root, {"Marimba": {"1": {"notes": "A4+C5+F5:2 A4+C5:1 r:1"}}})
+    m = root.find("part/measure")
+    assert {n.findtext("voice") for n in m.findall("note")} == {"1"}
+    assert m.find("backup") is None
+    assert len([n for n in m.findall("note") if n.find("chord") is not None]) == 3
+    assert score.bad_bars(root.find("part")) == []
+
+
+def test_a_patch_can_re_pitch_one_note_and_keep_its_marks():
+    root = build([_timed_part("P1", "Trombone", [("C4", 1), ("E4", 1), ("G4", 2)])])
+    second = root.findall(".//note")[1]
+    ET.SubElement(second.find("pitch"), "alter").text = "-1"
+    ET.SubElement(second, "notations").append(ET.Element("accent"))
+    repair.apply_patches(root, {"Trombone": {"1": "1 =En4:1 2"}})
+    note = root.findall(".//note")[1]
+    assert note.findtext("pitch/alter") is None and note.findtext("pitch/step") == "E"
+    assert note.find("notations/accent") is not None
+
+
+def test_a_fingered_tremolo_is_written_at_full_value_lasting_half():
+    root = build([_timed_part("P1", "Marimba", [("C5", 4)])])
+    repair.apply_patches(root, {"Marimba": {"1": {"notes": "F4+Bb4/D5:2 F4+Bb4:1 r:1"}}})
+    notes = root.find("part/measure").findall("note")
+    tremolo = notes[:3]
+    assert [n.findtext("type") for n in tremolo] == ["half"] * 3
+    assert [n.findtext("duration") for n in tremolo] == ["4", "4", "4"]            # a crotchet each
+    assert [n.findtext("time-modification/actual-notes") for n in tremolo] == ["2"] * 3
+    assert tremolo[0].find("notations/ornaments/tremolo").get("type") == "start"
+    assert tremolo[1].find("chord") is not None                                    # Bb4 on the F4
+    assert tremolo[2].find("notations/ornaments/tremolo").get("type") == "stop"
+    assert tremolo[2].findtext("pitch/step") == "D"
+    assert score.bad_bars(root.find("part")) == []
+    root = build([_timed_part("P1", "Marimba", [("C5", 4)])])
+    repair.apply_patches(root, {"Marimba": {"1": {"notes": "Bb4+D5/F5:4"}}})
+    assert [n.findtext("type") for n in root.iter("note")] == ["whole"] * 3
+
+
+def test_replacing_one_voice_of_a_piano_keeps_the_other_staff():
+    measure = ('<measure number="1">' + attributes()
+               + "".join(f"<note><pitch><step>D</step><octave>6</octave></pitch><duration>4</duration>"
+                         f"<voice>1</voice><staff>1</staff></note>" for _ in range(4))
+               + "<backup><duration>16</duration></backup>"
+               + '<note><rest measure="yes"/><duration>16</duration><voice>5</voice><staff>2</staff></note>'
+               + "</measure>")
+    root = build([("P1", "Piano", f'<part id="P1">{measure}</part>')])
+    repair.apply_patches(root, {"Piano": {"1": {"voice": "1", "notes": "D6:1/2 r:1/2 Bb5:1/2 r:1/2 Bb5:2"}}})
+    m = root.find("part/measure")
+    assert [e.tag for e in m if e.tag in ("note", "backup")] == ["note"] * 5 + ["backup", "note"]
+    assert m.find("backup/duration").text == "16"
+    assert m.findall("note")[-1].findtext("staff") == "2"
+    assert score.bad_bars(root.find("part")) == []
+
+
+def test_shortening_a_whole_bar_rest_makes_it_an_ordinary_rest():
+    measure = ('<measure number="1">' + attributes()
+               + '<note><rest measure="yes"/><duration>16</duration><voice>1</voice></note></measure>')
+    root = build([("P1", "Voice", f'<part id="P1">{measure}</part>')])
+    repair.apply_patches(root, {"Voice": {"1": "2 +G5:2~@Yeah,"}})
+    rest = root.find("part/measure/note")
+    assert rest.find("rest").get("measure") is None and rest.findtext("type") == "half"
+
+
+def _pitched(step, octave, alter=None, printed=False):
+    alter_xml = f"<alter>{alter}</alter>" if alter is not None else ""
+    accidental = "<accidental>natural</accidental>" if printed else ""
+    return (f"<note><pitch><step>{step}</step>{alter_xml}<octave>{octave}</octave></pitch>"
+            f"<duration>4</duration><voice>1</voice>{accidental}</note>")
+
+
+def test_a_lost_key_change_is_written_and_the_old_keys_flats_respelled():
+    # B-flat major until bar 2, where the score goes to C major but the key
+    # was not exported: bar 2's E-flats came from the old key.
+    flat_key = attributes(fifths=-2)
+    bar1 = f'<measure number="1">{flat_key}' + _pitched("E", 4, -1) * 4 + "</measure>"
+    bar2 = ('<measure number="2">' + _pitched("E", 4, -1) + _pitched("E", 4, -1)
+            + _pitched("B", 4, -1) + _pitched("G", 4) + "</measure>")
+    bar3 = '<measure number="3">' + _pitched("E", 4) * 4 + "</measure>"
+    oboe = f'<part id="P1">{bar1}{bar2}{bar3}</part>'
+    clarinet_bar2 = '<measure number="2"><attributes><key><fifths>2</fifths></key></attributes>' + _pitched("F", 5, 1) * 4 + "</measure>"
+    clarinet = f'<part id="P2"><measure number="1">{attributes(fifths=0)}{_pitched("F", 5) * 4}</measure>{clarinet_bar2}</part>'
+    root = build([("P1", "Oboe", oboe), ("P2", "Clarinet", clarinet)])
+    report = repair.repair(root, {"transpose": {"Clarinet": "Bb"}, "key_changes": {"2": 0}})
+    assert "key change at bar 2 (concert 0): written into 1 part(s), 3 note(s) respelled from the old key" in report
+    oboe_bars = root.findall("part")[0].findall("measure")
+    assert oboe_bars[1].findtext("attributes/key/fifths") == "0"
+    assert [n.findtext("pitch/alter") for n in oboe_bars[1].iter("note")] == [None, None, None, None]
+    assert [n.findtext("pitch/alter") for n in oboe_bars[0].iter("note")] == ["-1"] * 4     # before: kept
+    clarinet_bar = root.findall("part")[1].findall("measure")[1]
+    assert clarinet_bar.findtext("attributes/key/fifths") == "2"                          # read right: kept
+    assert [n.findtext("pitch/alter") for n in clarinet_bar.iter("note")] == ["1"] * 4
+
+
+def test_a_printed_accidental_and_what_it_governs_are_not_respelled():
+    flat_key = attributes(fifths=-2)
+    bar1 = f'<measure number="1">{flat_key}' + _pitched("C", 5) * 4 + "</measure>"
+    bar2 = ('<measure number="2">' + _pitched("E", 5, -1, printed=True)
+            + _pitched("E", 5, -1) + _pitched("E", 4, -1) + _pitched("C", 5) + "</measure>")
+    root = build([("P1", "Oboe", f'<part id="P1">{bar1}{bar2}</part>')])
+    repair.repair(root, {"key_changes": {"2": 0}})
+    alters = [n.findtext("pitch/alter") for n in root.findall("part/measure")[1].iter("note")]
+    assert alters == ["-1", "-1", None, None]       # E5s printed flat; E4 from the old key
+
+
+@pytest.mark.parametrize("fifths,step,alter", [(-2, "B", -1), (-2, "E", -1), (-2, "A", 0),
+                                                (2, "F", 1), (2, "C", 1), (2, "G", 0), (0, "B", 0)])
+def test_key_alter(fifths, step, alter):
+    assert repair.key_alter(fifths, step) == alter
+
+
+def test_a_drum_patch_and_a_patch_that_does_not_fill_the_bar():
+    drums = f'<part id="P1">{drum_bar(1, KICK_ONLY, True)}</part>'
+    root = build([("P1", "Drum Set", drums)])
+    repair.apply_patches(root, {"Drum Set": {"1": {"up": "D5:1 D5:1 B4:1 xA5:1", "down": "r:2 r:1 F4:1"}}})
+    assert len(root.find("part/measure").findall("note")) == 7
+    root = build([_timed_part("P1", "Oboe", [("C5", 1)] * 4)])
+    with pytest.raises(ValueError, match="lasts 7/2"):
+        repair.apply_patches(root, {"Oboe": {"1": "1 1 1 1/2"}})
+    with pytest.raises(ValueError, match="covers 3 of the voice's 4"):
+        repair.apply_patches(build([_timed_part("P1", "Oboe", [("C5", 1)] * 4)]), {"Oboe": {"1": "1 1 2"}})
 
 
 @pytest.mark.parametrize("config", [{"transpose": {"Nobody": "Bb"}}, {"transpose": {"Flute": "H"}},

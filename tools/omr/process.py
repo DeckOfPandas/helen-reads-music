@@ -256,6 +256,13 @@ def process(piece: Path, force: bool = False, run=audiveris.run,
                 borrowed = repair.borrow_rests(root, assume_time)
                 merge_report += ["", f"rests put back from matching bars: {len(borrowed)}",
                                  *(f"  {line}" for line in borrowed)]
+            if table.get("patches"):
+                try:
+                    patched = repair.apply_patches(root, table["patches"], assume_time)
+                except ValueError as err:
+                    return False, notes + [f"merge.json: {err}"]
+                merge_report += ["", f"bars patched by hand: {len(patched)}",
+                                 *(f"  {line}" for line in patched)]
             score.save(root, merged, like=merged)
             check = score.check(merged, assume_time)
             merge_report += ["", *check]

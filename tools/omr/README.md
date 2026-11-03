@@ -45,6 +45,8 @@ call:
 | `"time": "4/4"` | Writes the time signature where Audiveris missed it, and sets whole-bar rests to it |
 | `"transpose": {"Clarinet in Bb": "Bb"}` | Marks transposing instruments (Bb, A, F, Eb, 8va, 8vb) and gives them their written key |
 | `"octave_clefs": false` | The score has no octave clefs: undoes treble clefs Audiveris read as "8 below" |
+| `"key_changes": {"125": 0}` | A key change Audiveris read but failed to export: writes it into the parts that lack it and respells the notes the old key altered |
+| `"patches": {"Oboe": {"121": "1/2 1/2 +r:1/2 ..."}}` | Hand corrections to single bars, applied last: edit the existing notes (lengths, re-pitch, insert, delete) so lyrics and marks survive, or replace a voice; fingered tremolos as `F4+Bb4/D5:2`; see `repair.py --help` |
 | `"drum_grooves": {...}` | Writes whole kit grooves (hi-hats included, which Audiveris misses) into the bars whose kick and snare match, or into listed bars; see `repair.py --help` |
 | `"borrow_rests": false` | Turns off putting back rests a short bar is missing, copied from a matching bar elsewhere |
 
