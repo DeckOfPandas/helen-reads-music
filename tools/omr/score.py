@@ -65,23 +65,32 @@ def load(path: Path | str) -> ET.Element:
     return ET.fromstring(path.read_bytes())
 
 
+# Audiveris writes version="4.0.3", the version of its MusicXML library,
+# not of MusicXML; Sibelius does not recognise it and warns that the file
+# is an old version. Any version MusicXML never had is written as this one.
+MUSICXML_VERSION = "4.0"
+MUSICXML_VERSIONS = {"1.0", "1.1", "2.0", "3.0", "3.1", "4.0"}
 DOCTYPES = {
-    "score-partwise": '<!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML 4.0 Partwise//EN" '
+    "score-partwise": '<!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML {version} Partwise//EN" '
                       '"http://www.musicxml.org/dtds/partwise.dtd">',
 }
 
 
 def save(root: ET.Element, out: Path | str, like: Path | str | None = None) -> None:
-    """Write `root` to `out` (.mxl or plain XML). For .mxl, every other member
-    of `like` (container, images) is copied across. Written to a side file and
+    """Write `root` to `out` (.mxl or plain XML), with the DOCTYPE naming
+    its MusicXML version, a real one. For .mxl, every other member of `like`
+    (container, images) is copied across. Written to a side file and
     renamed, so a failure never leaves half a score."""
     out = Path(out)
+    if root.tag in DOCTYPES and root.get("version") not in MUSICXML_VERSIONS:
+        root.set("version", MUSICXML_VERSION)
     xml_bytes = ET.tostring(root, encoding="UTF-8", xml_declaration=True)
+    if root.tag in DOCTYPES:
+        declaration, rest = xml_bytes.split(b"\n", 1)
+        doctype = DOCTYPES[root.tag].format(version=root.get("version") or MUSICXML_VERSION)
+        xml_bytes = declaration + b"\n" + doctype.encode() + b"\n" + rest
     tmp = out.with_name(out.name + ".partial")
     if out.suffix.lower() != ".mxl":
-        if root.tag in DOCTYPES:                # a plain file says what it is, for notation software
-            declaration, rest = xml_bytes.split(b"\n", 1)
-            xml_bytes = declaration + b"\n" + DOCTYPES[root.tag].encode() + b"\n" + rest
         tmp.write_bytes(xml_bytes)
     else:
         with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout:

@@ -125,7 +125,8 @@ def test_merge_json_is_applied_and_checked(tmp_path):
     merged = piece / "omr" / "under-the-sea-merged.mxl"
     assert [n for _, n in score.part_names(score.load(merged))] == ["Flute"]
     plain = merged.with_suffix(".musicxml")
-    assert plain.read_text(encoding="utf-8").splitlines()[1].startswith("<!DOCTYPE score-partwise")
+    assert plain.read_text(encoding="utf-8").splitlines()[1].startswith(
+        '<!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML 4.0 Partwise//EN"')
     assert [n for _, n in score.part_names(score.load(plain))] == ["Flute"]
     assert "conserved" in (piece / "omr" / "merge-report.txt").read_text()
     assert any("merged and repaired with merge.json" in n for n in notes)

@@ -129,6 +129,21 @@ def test_save_round_trips_and_keeps_other_members(tmp_path):
     assert not list(tmp_path.glob("*.partial"))
 
 
+def test_save_writes_a_real_musicxml_version(tmp_path):
+    import zipfile
+    root = score.ET.fromstring(make_score([("P1", "Flute", part("P1", [bar(four_crotchets(), 1, attributes())]))]))
+    root.set("version", "4.0.3")                    # Audiveris's library version, not MusicXML's
+    out = tmp_path / "out.mxl"
+    score.save(root, out)
+    with zipfile.ZipFile(out) as z:
+        text = z.read("score.xml").decode()
+    assert 'DTD MusicXML 4.0 Partwise' in text.splitlines()[1]
+    assert '<score-partwise version="4.0">' in text
+    root.set("version", "3.1")                      # a real version is kept
+    score.save(root, tmp_path / "out.musicxml")
+    assert 'version="3.1"' in (tmp_path / "out.musicxml").read_text()
+
+
 def test_diff_lists_bars_whose_notes_or_lyrics_changed(tmp_path):
     def version(name, third_bar, lyric=""):
         bars = [bar(four_crotchets(), 1, attributes()), bar(four_crotchets(), 2), bar(third_bar, 3)]
