@@ -35,7 +35,10 @@ Everything made goes in library/<piece>/omr/:
                                 transposition, whole-bar rests)
   merge-report.txt              what the merge and repairs did, or why the merge
                                 refused; how the second read was matched and
-                                which bars came from it; the check of the result
+                                which bars came from it; what the PDF's drawing
+                                corrected (drawing_check.py, when
+                                library/<piece>/glyphs.json exists); the check
+                                of the result
   audiveris.log                 the full Audiveris log
   work/                         the PDF handed to Audiveris
 
@@ -256,6 +259,8 @@ def process(piece: Path, force: bool = False, run=audiveris.run,
                 borrowed = repair.borrow_rests(root, assume_time)
                 merge_report += ["", f"rests put back from matching bars: {len(borrowed)}",
                                  *(f"  {line}" for line in borrowed)]
+            if table.get("drawing_check", True):
+                merge_report += ["", *drawing_pass(root, piece, table, assume_time)]
             if table.get("patches"):
                 try:
                     patched = repair.apply_patches(root, table["patches"], assume_time)
@@ -263,6 +268,8 @@ def process(piece: Path, force: bool = False, run=audiveris.run,
                     return False, notes + [f"merge.json: {err}"]
                 merge_report += ["", f"bars patched by hand: {len(patched)}",
                                  *(f"  {line}" for line in patched)]
+                if table.get("drawing_check", True):
+                    merge_report += ["", *drawing_pass(root, piece, table, assume_time, patched_only=True)]
             merge_report += ["", *repair.voice_drum_parts(root, table.get("drum_key"))]
             labels = dict(table.get("labels") or {})
             try:
@@ -281,6 +288,32 @@ def process(piece: Path, force: bool = False, run=audiveris.run,
             notes.append("merge REFUSED: it would have lost notes; see merge-report.txt")
         (out / "merge-report.txt").write_text("\n".join(merge_report) + "\n", encoding="utf-8")
     return True, notes
+
+
+def drawing_pass(root: score.ET.Element, piece: Path, table: dict, assume_time,
+                 patched_only: bool = False) -> list[str]:
+    """Check and correct the score against the PDFs' own drawing
+    (drawing_check.py), leaving the bars merge.json patches by hand alone;
+    or, `patched_only`, check just those bars, correcting only their ties.
+    Report lines."""
+    import drawing_check
+    import vector
+    pdfs = vector.piece_pdfs(piece)
+    if not pdfs:
+        return ["drawing check: no PDFs in the piece; skipped"]
+    try:
+        import pymupdf  # noqa: F401
+    except ImportError:
+        return ["drawing check: PyMuPDF is not installed; skipped"]
+    skip = {(part, bar) for part, bars in (table.get("patches") or {}).items() if not part.startswith("_")
+            for bar in bars if not bar.startswith("_")}
+    if patched_only:
+        findings, _ = drawing_check.check(root, piece, pdfs, fix=True, assume=assume_time, only=skip)
+        return [f"hand patches checked against the drawing: {len(findings)} disagree, "
+                f"{sum(f.fixed for f in findings)} in their ties only (set as drawn)",
+                *(f"  {f.describe()}" for f in findings)]
+    _, report = drawing_check.check(root, piece, pdfs, fix=True, assume=assume_time, skip=skip)
+    return report
 
 
 def second_opinion(primary: score.ET.Element, second: Path, table: dict, assume_time) -> list[str]:

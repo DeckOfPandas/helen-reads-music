@@ -1,0 +1,416 @@
+#!/usr/bin/env python3
+"""Read the drawing of an engraved PDF: staves, bar lines, stems and named symbols.
+
+USAGE (from the repo root):
+    python3 tools/omr/vector.py survey library/<piece> [--min N]  # cluster the shapes; write a catalogue draft
+    python3 tools/omr/vector.py show library/<piece> <page> # what was found on a page
+
+A PDF exported from notation software is vector drawing, not pixels: every
+stave line, bar line and symbol is an exact shape at an exact place. The
+same symbol (a crotchet rest, a black notehead) is drawn with the same path
+every time, only moved, so its path is a fingerprint. This module finds:
+
+  staves     five evenly spaced long horizontal lines
+  bar lines  vertical strokes, thicker than stems, crossing a stave
+  stems      thin vertical strokes
+  glyphs     filled shapes, each with its fingerprint, stave and bar
+
+and names glyphs from library/<piece>/glyphs.json, a catalogue mapping
+fingerprint to symbol. `survey` writes a draft of it, naming what it can
+from each shape's size against the stave's line spacing, and
+library/<piece>/omr/views/glyphs.png showing one of each for checking. A
+scanned PDF has no such drawing; then there are no staves and nothing here
+applies.
+
+Symbol names used: notehead-black, notehead-half, notehead-whole,
+notehead-x, rest-whole (or half: one rectangle, told apart by where it sits),
+rest-quarter, rest-eighth, rest-16th, dot, flag-8th-up, flag-8th-down,
+flag-16th-up, flag-16th-down, flat, sharp, natural, tremolo, beam,
+open (the small circle of an open hi-hat), other.
+"""
+from __future__ import annotations
+
+import io
+import json
+import sys
+from collections import Counter, defaultdict
+from dataclasses import dataclass, field
+from pathlib import Path
+
+LINE_WIDTH_STEM_MAX = 0.42          # stems are thinner than bar lines (0.37 vs 0.47 here)
+
+
+@dataclass
+class Stave:
+    lines: list[float]               # y of the five lines, top first
+    left: float
+    right: float
+
+    @property
+    def gap(self) -> float:
+        return (self.lines[-1] - self.lines[0]) / 4
+
+    @property
+    def top(self) -> float:
+        return self.lines[0]
+
+    @property
+    def bottom(self) -> float:
+        return self.lines[-1]
+
+    def step(self, y: float) -> float:
+        """Stave position of a y: 0 the bottom line, 1 the space above, 8 the
+        top line; negative below, above 8 above."""
+        return (self.bottom - y) / (self.gap / 2)
+
+
+@dataclass
+class Glyph:
+    key: str                         # fingerprint
+    x0: float
+    y0: float
+    x1: float
+    y1: float
+    name: str = "other"
+    stave: int | None = None
+    bar: int | None = None           # 0-based within the stave's bar lines
+
+    @property
+    def cx(self) -> float:
+        return (self.x0 + self.x1) / 2
+
+    @property
+    def cy(self) -> float:
+        return (self.y0 + self.y1) / 2
+
+    @property
+    def width(self) -> float:
+        return self.x1 - self.x0
+
+    @property
+    def height(self) -> float:
+        return self.y1 - self.y0
+
+
+@dataclass
+class Stem:
+    x: float
+    y0: float
+    y1: float
+
+
+@dataclass
+class Page:
+    staves: list[Stave]
+    bar_lines: list[list[float]]     # per stave, the x of each bar line, merged, left to right
+    glyphs: list[Glyph]
+    stems: list[Stem]
+    ledgers: list[tuple[float, float, float]] = field(default_factory=list)   # (x0, x1, y)
+
+    def bar_count(self, stave: int) -> int:
+        return max(len(self.bar_lines[stave]) - 1, 0)
+
+
+def fingerprint(drawing: dict) -> str:
+    """The path's item kinds and points relative to its top-left corner,
+    rounded to 0.1 pt: the same glyph drawn anywhere gives the same key."""
+    r = drawing["rect"]
+    parts = []
+    for item in drawing["items"]:
+        coords = []
+        for p in item[1:]:
+            if hasattr(p, "x"):
+                coords.append(f"{p.x - r.x0:.1f},{p.y - r.y0:.1f}")
+            elif hasattr(p, "x0"):
+                coords.append(f"{p.x0 - r.x0:.1f},{p.y0 - r.y0:.1f},{p.x1 - r.x0:.1f},{p.y1 - r.y0:.1f}")
+        parts.append(item[0] + ":" + ";".join(coords))
+    return "|".join(parts)
+
+
+def _staves(horizontals: list[tuple[float, float, float]]) -> list[Stave]:
+    """Groups of five long horizontals, evenly spaced, sharing their x extent."""
+    rows = sorted(horizontals, key=lambda h: (round(h[0]), h[2]))
+    by_extent: dict[tuple[int, int], list[float]] = defaultdict(list)
+    for x0, x1, y in rows:
+        by_extent[(round(x0), round(x1))].append(y)
+    staves = []
+    for (x0, x1), ys in by_extent.items():
+        ys = sorted(set(round(y, 2) for y in ys))
+        i = 0
+        while i + 4 < len(ys):
+            group = ys[i:i + 5]
+            gaps = [b - a for a, b in zip(group, group[1:])]
+            if max(gaps) - min(gaps) < 0.15 and 1.5 < gaps[0] < 12:
+                staves.append(Stave(group, float(x0), float(x1)))
+                i += 5
+            else:
+                i += 1
+    return sorted(staves, key=lambda s: s.top)
+
+
+def read_page(page) -> Page:
+    """Everything this module finds on one pymupdf page."""
+    drawings = page.get_drawings()
+    horizontals, verticals, stems, ledgers = [], [], [], []
+    filled = []
+    for d in drawings:
+        if d.get("fill") is not None:
+            filled.append(d)
+            continue
+        width = d.get("width") or 0
+        for item in d["items"]:
+            if item[0] != "l":
+                continue
+            p, q = item[1], item[2]
+            if abs(p.y - q.y) < 0.05:
+                length = abs(p.x - q.x)
+                if length > 40:
+                    horizontals.append((min(p.x, q.x), max(p.x, q.x), p.y))
+                elif length > 3:
+                    ledgers.append((min(p.x, q.x), max(p.x, q.x), p.y))
+            elif abs(p.x - q.x) < 0.05 and abs(p.y - q.y) > 3:
+                y0, y1 = min(p.y, q.y), max(p.y, q.y)
+                if width <= LINE_WIDTH_STEM_MAX:
+                    stems.append(Stem(p.x, y0, y1))
+                else:
+                    verticals.append((p.x, y0, y1))
+    staves = _staves(horizontals)
+    bar_lines = []
+    for stave in staves:
+        xs = sorted(x for x, y0, y1 in verticals
+                    if y0 <= stave.top + 0.5 and y1 >= stave.bottom - 0.5 and stave.left - 1 <= x <= stave.right + 1)
+        merged: list[float] = []
+        for x in xs:
+            if not merged or x - merged[-1] > stave.gap * 1.4:      # a double bar line counts once
+                merged.append(x)
+            else:
+                merged[-1] = x                                    # keep the right-hand line
+        if merged and merged[0] - stave.left > stave.gap * 2:
+            merged.insert(0, stave.left)                          # the system's opening line, if not drawn here
+        bar_lines.append(merged)
+    glyphs = []
+    for d in filled:
+        r = d["rect"]
+        glyphs.append(Glyph(fingerprint(d), r.x0, r.y0, r.x1, r.y1))
+    result = Page(staves, bar_lines, glyphs, stems, ledgers)
+    for glyph in glyphs:
+        _place_glyph(result, glyph)
+    return result
+
+
+def _place_glyph(page: Page, glyph: Glyph) -> None:
+    """The stave whose reach (six spaces beyond its outer lines) holds the
+    glyph's centre, nearest first; then the bar it falls in."""
+    best = None
+    for index, stave in enumerate(page.staves):
+        reach = stave.gap * 6
+        if stave.top - reach <= glyph.cy <= stave.bottom + reach and stave.left - 2 <= glyph.cx <= stave.right + 2:
+            distance = 0 if stave.top <= glyph.cy <= stave.bottom else min(
+                abs(glyph.cy - stave.top), abs(glyph.cy - stave.bottom))
+            if best is None or distance < best[0]:
+                best = (distance, index)
+    if best is None:
+        return
+    glyph.stave = best[1]
+    lines = page.bar_lines[glyph.stave]
+    inside = [i for i in range(len(lines) - 1) if lines[i] <= glyph.cx < lines[i + 1]]
+    glyph.bar = inside[0] if inside else None
+
+
+# --- the catalogue ---------------------------------------------------------------
+
+def catalogue_path(piece: Path) -> Path:
+    return piece / "glyphs.json"
+
+
+def load_catalogue(piece: Path) -> dict[str, str]:
+    path = catalogue_path(piece)
+    if not path.is_file():
+        return {}
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return {key: entry["name"] for key, entry in data.get("glyphs", {}).items()}
+
+
+def name_glyphs(page: Page, catalogue: dict[str, str]) -> None:
+    for glyph in page.glyphs:
+        glyph.name = catalogue.get(glyph.key, "other")
+    _place_by_ledgers(page)
+
+
+def _ledger_ladder(stave: Stave, y: float, ledgers: list[float]) -> bool:
+    """Whether a note at height y is joined to this stave by its ledger lines:
+    one at every stave space from the stave's edge out to the note (none if
+    the note is within a space of the stave)."""
+    gap, slack = stave.gap, stave.gap * 0.3
+    if y < stave.top:
+        distance, edge, sign = stave.top - y, stave.top, -1
+    elif y > stave.bottom:
+        distance, edge, sign = y - stave.bottom, stave.bottom, 1
+    else:
+        return True
+    needed = int(distance / gap + 0.25)
+    if needed == 0:
+        return distance < gap
+    if needed > 8:
+        return False
+    return all(any(abs(l - (edge + sign * k * gap)) < slack for l in ledgers) for k in range(1, needed + 1))
+
+
+def _place_by_ledgers(page: Page) -> None:
+    """A notehead outside the staves belongs to the stave its ledger lines
+    lead to, not the nearest one: a cello's high notes, three ledger lines
+    above its stave, can sit nearer the viola's. Ledgers below the head mean
+    it is above a stave (the first stave below the lowest of them); ledgers
+    above mean it is below one. An augmentation dot follows the notehead it
+    belongs to."""
+    heads = [g for g in page.glyphs if g.name.startswith("notehead")]
+    for head in heads:
+        if head.stave is None:
+            continue
+        stave = page.staves[head.stave]
+        if stave.top - stave.gap * 0.75 <= head.cy <= stave.bottom + stave.gap * 0.75:
+            continue
+        ledgers = [y for x0, x1, y in page.ledgers if x0 - 1 <= head.cx <= x1 + 1]
+        owners = [i for i, s in enumerate(page.staves) if _ledger_ladder(s, head.cy, ledgers)]
+        target = None
+        if len(owners) == 1:
+            target = owners[0]
+        elif len(owners) > 1:
+            target = min(owners, key=lambda i: min(abs(head.cy - page.staves[i].top),
+                                                   abs(head.cy - page.staves[i].bottom)))
+        if target is not None and target != head.stave:
+            head.stave = target
+            lines = page.bar_lines[target]
+            inside = [i for i in range(len(lines) - 1) if lines[i] <= head.cx < lines[i + 1]]
+            head.bar = inside[0] if inside else None
+    for dot in (g for g in page.glyphs if g.name == "dot"):
+        gap = page.staves[dot.stave].gap if dot.stave is not None else 3
+        owners = [h for h in heads if 0 < dot.x0 - h.x1 < gap * 1.6 and abs(dot.cy - h.cy) < gap * 0.8]
+        if owners:
+            owner = min(owners, key=lambda h: dot.x0 - h.x1)
+            dot.stave, dot.bar = owner.stave, owner.bar
+
+
+def guess_name(width: float, height: float, kinds: str, gap: float) -> str:
+    """A first guess from a shape's size in stave spaces and its path kinds;
+    the survey's draft, to be confirmed by eye."""
+    w, h = width / gap, height / gap
+    curves, lines = kinds.count("c"), kinds.count("l")
+    if 1.1 <= w <= 1.45 and 0.85 <= h <= 1.15 and lines == 0:
+        return "notehead-black"
+    if 0.95 <= w <= 1.15 and 0.9 <= h <= 1.1 and curves == 0 and lines >= 8:
+        return "notehead-x"
+    if 1.6 <= w <= 1.9 and 0.9 <= h <= 1.1:
+        return "notehead-whole"
+    if 1.15 <= w <= 1.35 and 0.4 <= h <= 0.55 and kinds == "llll":
+        return "rest-whole"
+    if 0.95 <= w <= 1.15 and 3.1 <= h <= 3.5:
+        return "rest-quarter"
+    if 1.05 <= w <= 1.2 and 1.7 <= h <= 1.9:
+        return "rest-eighth"
+    if 0.2 <= w <= 0.4 and 0.2 <= h <= 0.4 and lines == 0:
+        return "dot"
+    if 0.7 <= w <= 0.85 and 2.3 <= h <= 2.6:
+        return "flat"
+    if 0.7 <= w <= 0.85 and 0.7 <= h <= 0.85 and lines == 0:
+        return "open"
+    return "other"
+
+
+def survey(piece: Path, pdfs: list[Path]) -> dict:
+    """Cluster every filled shape in the piece; draft names; render exemplars."""
+    import pymupdf
+    clusters: dict[str, dict] = {}
+    for pdf in pdfs:
+        with pymupdf.open(pdf) as doc:
+            for page_number, pg in enumerate(doc):
+                page = read_page(pg)
+                if not page.staves:
+                    continue
+                gap = sorted(s.gap for s in page.staves)[len(page.staves) // 2]
+                for glyph in page.glyphs:
+                    entry = clusters.setdefault(glyph.key, {
+                        "count": 0, "width": round(glyph.width, 2), "height": round(glyph.height, 2),
+                        "kinds": "".join(part.split(":")[0] for part in glyph.key.split("|")),
+                        "example": [pdf.name, page_number, glyph.x0, glyph.y0, glyph.x1, glyph.y1],
+                        "gap": round(gap, 3)})
+                    entry["count"] += 1
+    return clusters
+
+
+def write_draft(piece: Path, clusters: dict, minimum: int = 3) -> Path:
+    existing = load_catalogue(piece)
+    glyphs = {}
+    for key, entry in sorted(clusters.items(), key=lambda kv: -kv[1]["count"]):
+        if entry["count"] < minimum and key not in existing:
+            continue
+        name = existing.get(key) or guess_name(entry["width"], entry["height"], entry["kinds"], entry["gap"])
+        glyphs[key] = {"name": name, "count": entry["count"], "size": [entry["width"], entry["height"]],
+                       "example": entry["example"]}
+    path = catalogue_path(piece)
+    path.write_text(json.dumps({"_help": "fingerprint -> symbol name (see tools/omr/vector.py); "
+                                         "check names against omr/views/glyphs.png",
+                                "glyphs": glyphs}, indent=1) + "\n", encoding="utf-8")
+    return path
+
+
+def render_exemplars(piece: Path, out: Path) -> Path:
+    """One example of each catalogued shape, numbered as in glyphs.json, with its name."""
+    import pymupdf
+    from PIL import Image, ImageDraw
+    data = json.loads(catalogue_path(piece).read_text(encoding="utf-8"))["glyphs"]
+    tiles = []
+    for number, (key, entry) in enumerate(data.items()):
+        pdf, page_number, x0, y0, x1, y1 = entry["example"]
+        with pymupdf.open(piece / pdf) as doc:
+            clip = pymupdf.Rect(x0 - 3, y0 - 3, x1 + 3, y1 + 3)
+            png = doc[page_number].get_pixmap(matrix=pymupdf.Matrix(6, 6), clip=clip).tobytes("png")
+        image = Image.open(io.BytesIO(png)).convert("RGB")
+        tile = Image.new("RGB", (220, 160), "white")
+        image.thumbnail((210, 110))
+        tile.paste(image, (5, 5))
+        ImageDraw.Draw(tile).text((5, 125), f"#{number} {entry['name']} x{entry['count']}", fill=(200, 0, 0))
+        tiles.append(tile)
+    columns = 8
+    sheet = Image.new("RGB", (220 * columns, 160 * ((len(tiles) + columns - 1) // columns)), "white")
+    for index, tile in enumerate(tiles):
+        sheet.paste(tile, ((index % columns) * 220, (index // columns) * 160))
+    out.parent.mkdir(parents=True, exist_ok=True)
+    sheet.save(out)
+    return out
+
+
+def piece_pdfs(piece: Path) -> list[Path]:
+    import pages
+    return sorted((p for p in piece.iterdir() if p.suffix.lower() == ".pdf"), key=pages.page_order)
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) >= 2 and argv[0] == "survey":
+        piece = Path(argv[1])
+        minimum = int(argv[argv.index("--min") + 1]) if "--min" in argv else 1
+        clusters = survey(piece, piece_pdfs(piece))
+        path = write_draft(piece, clusters, minimum)
+        sheet = render_exemplars(piece, piece / "omr" / "views" / "glyphs.png")
+        named = Counter(e["name"] for e in json.loads(path.read_text())["glyphs"].values())
+        print(f"{len(clusters)} distinct shapes; catalogue draft {path}; exemplars {sheet}")
+        print("names:", dict(named))
+        return 0
+    if len(argv) == 3 and argv[0] == "show":
+        import pymupdf
+        piece = Path(argv[1])
+        pdf = piece_pdfs(piece)[int(argv[2]) - 1]
+        with pymupdf.open(pdf) as doc:
+            page = read_page(doc[0])
+        name_glyphs(page, load_catalogue(piece))
+        for index, stave in enumerate(page.staves):
+            counts = Counter(g.name for g in page.glyphs if g.stave == index)
+            print(f"stave {index}: y {stave.top:.1f}-{stave.bottom:.1f} gap {stave.gap:.2f}, "
+                  f"{page.bar_count(index)} bars, {dict(counts)}")
+        return 0
+    print(__doc__, file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -515,9 +515,15 @@ def borrow_rests(root: ET.Element, assume: Fraction | None = None) -> list[str]:
 
 
 def _divisions(measure: ET.Element, state: dict) -> Fraction | None:
-    for attributes in measure.findall("attributes"):
-        if attributes.findtext("divisions"):
-            return Fraction(attributes.findtext("divisions"))
+    # A bar can restate divisions; the last before its first note counts.
+    found = None
+    for element in measure:
+        if element.tag == "note":
+            break
+        if element.tag == "attributes" and element.findtext("divisions"):
+            found = Fraction(element.findtext("divisions"))
+    if found is not None:
+        return found
     element = state.get(("divisions", "1"))
     return Fraction(element.text) if element is not None else None
 
@@ -541,6 +547,7 @@ class DrumEvent:
     accent: bool = False         # >
     strong: bool = False         # ^ (marcato)
     tie_start: bool = False      # tied on to the next
+    hidden: bool = False         # an invisible rest, padding a voice the page leaves short
 
 
 def parse_groove_voice(text: str) -> list[DrumEvent]:
@@ -616,9 +623,12 @@ def _drum_notes(events: list[DrumEvent], voice: str, stem: str, divisions: Fract
         ticks = event.length * divisions
         if ticks.denominator != 1:
             raise ValueError(f"drum groove length {event.length} does not fit divisions {divisions}")
-        kind, dots, _ = _length_spelling(event.length)
+        try:
+            kind, dots, _ = _length_spelling(event.length)
+        except ValueError:
+            kind, dots = None, 0                             # padding of an odd length: no type
         for index, head in enumerate(event.heads or [None]):
-            note = ET.Element("note")
+            note = ET.Element("note", {"print-object": "no"} if event.hidden and head is None else {})
             if index:
                 ET.SubElement(note, "chord")
             if head is None:
@@ -632,7 +642,8 @@ def _drum_notes(events: list[DrumEvent], voice: str, stem: str, divisions: Fract
             for kind_of_tie in ties:
                 ET.SubElement(note, "tie", {"type": kind_of_tie})
             ET.SubElement(note, "voice").text = voice
-            ET.SubElement(note, "type").text = kind
+            if kind:
+                ET.SubElement(note, "type").text = kind
             for _ in range(dots):
                 ET.SubElement(note, "dot")
             if head is not None:
@@ -742,6 +753,7 @@ DRUM_KEY = {
     ("G5", "x"): (42, "Closed Hi-Hat"),
     ("G5", "x", "open"): (46, "Open Hi-Hat"),
     ("A5", "x"): (49, "Crash Cymbal"),
+    ("C6", "x"): (49, "Crash Cymbal"),           # some engravers put it on the second ledger
     ("F5", "x"): (51, "Ride Cymbal"),
     ("F5", "normal"): (50, "High Tom"),
     ("E5", "normal"): (50, "High Tom"),
@@ -854,9 +866,19 @@ def _staff_streams(measure: ET.Element, staff: int, staves: int) -> list[list[ET
 
 
 def _stream_signature(streams: list[list[ET.Element]], divisions: Fraction) -> list:
-    return [[("r" if e.find("rest") is not None else score.midi(e) if e.tag == "note" else "fwd",
-              Fraction(e.findtext("duration") or 0) / divisions, e.find("chord") is not None)
-             for e in stream] for stream in streams]
+    """Per stream, its chords in time order, each (sorted pitches, length):
+    the order a chord's notes are written in does not matter."""
+    out = []
+    for stream in streams:
+        chords: list[tuple[list, Fraction]] = []
+        for e in stream:
+            what = "r" if e.find("rest") is not None else score.midi(e) if e.tag == "note" else "fwd"
+            if e.find("chord") is not None and chords:
+                chords[-1][0].append(what)
+            else:
+                chords.append(([what], Fraction(e.findtext("duration") or 0) / divisions))
+        out.append([(sorted(map(str, pitches)), length) for pitches, length in chords])
+    return out
 
 
 def _silent(streams: list[list[ET.Element]]) -> bool:

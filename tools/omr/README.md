@@ -24,6 +24,36 @@ sharper read is the primary, and `merge.json` is written for it. Where one
 of its bars does not add up, the bar comes from the 300 DPI read if that
 one's does (`combine.py`, which matches that read's parts itself).
 
+## Reading the PDF's own drawing
+
+A PDF exported from notation software is a drawing, not pixels: every
+notehead, beam, rest and tie is an exact shape at an exact place. Where the
+PDFs are such drawings, the drawing is the check on Audiveris, and the
+fix for most of its mistakes. Once per piece, name the shapes:
+
+    python3 tools/omr/vector.py survey library/<piece>
+
+writes `library/<piece>/glyphs.json`, every distinct shape with a guessed
+name, and `omr/views/glyphs.png`, one of each numbered. Correct the names
+that are wrong (an unnamed shape is `other`), then run `process.py`. After
+the merge and repairs, `drawing_check.py` matches each drawn stave to its
+part and reads every bar from the drawing (`vector_read.py`); where that
+reading adds up and differs from the score, it wins:
+
+- the key drawn after each clef, or at a bar line, is the key;
+- a stave's bar with a wrong note, a lost note or wrong rhythm is replaced
+  by the drawing's reading (lyrics kept where the notes line up, dynamics
+  kept at their beat);
+- rests missing from an otherwise right bar are put back;
+- ties are set as drawn;
+- a drum bar is written from the drawing, voices as drawn, a voice the page
+  leaves without rests padded with invisible ones.
+
+A bar whose drawing does not add up (tuplets, grace notes) is reported, not
+changed. Bars patched by hand are left alone; after the patches they are
+checked against the drawing, and only their ties are corrected. A scanned
+PDF has no drawing, and no `glyphs.json` means no check.
+
 ## Merging the parts Audiveris split
 
 On a score of several pages Audiveris makes one instrument into many parts,
@@ -51,6 +81,7 @@ call:
 | `"drum_key": {"F5 x": 51}` | Extra drum sounds by stave position and notehead; every drum note gets its instrument, hands stems up, feet stems down |
 | `"drum_grooves": {...}` | Writes whole kit grooves (hi-hats included, which Audiveris misses) into the bars whose kick and snare match, or into listed bars; see `repair.py --help` |
 | `"borrow_rests": false` | Turns off putting back rests a short bar is missing, copied from a matching bar elsewhere |
+| `"drawing_check": false` | Turns off checking and correcting against the PDF's drawing |
 
 ## Checking what came out
 
@@ -71,6 +102,9 @@ bar the two reads got right but differently. Those are the bars to look at.
 | `merge.py` | The merge, on its own |
 | `repair.py` | The repairs, on their own |
 | `combine.py` | Matching the second read and filling bars from it |
+| `vector.py` | The PDF's drawing: staves, bar lines, stems, named shapes; `survey` makes `glyphs.json` |
+| `vector_read.py` | One bar of one stave read from the drawing: notes, lengths, ties, voices, pitches |
+| `drawing_check.py` | The score checked and corrected against the drawing |
 
 Each one's `--help` (or its docstring) says what it does and why. Tests are
 in `tests/omr/`, on music they generate.
