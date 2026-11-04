@@ -206,6 +206,25 @@ Follow the end-of-work list in `CLAUDE.md`, and add:
 
 There is no drawing to check against, so the second read and doublings
 (parts that play the same line) are the only second opinions. Expect more
-bars that don't add up, and more patches. Drum parts suffer most:
+bars that don't add up, and more patches.
+
+Before the first read, write `library/<piece>/printed-bars.json`: each
+page's first and last printed bar number. Read them off the pages: a
+picture of just the strip of bar numbers at the foot of each page, stacked
+for a dozen pages at a time, is quick to read. With it, every page is read
+until its bars match (`tools/omr/README.md`, "Pages with the wrong number
+of bars"), and the score has the printed bars, in the printed places.
+Without it, one page Audiveris reads as two systems shifts every bar after
+it.
+
+Check the resolution first: a page under about 150 DPI has its stave
+lines under 11 px apart, and Audiveris reads it poorly whatever is done
+after. Ask Helen for a better scan before spending hours on a poor one.
+
+Part names on a scan are mostly unreadable ("Voice"), so the draft's
+placing by name fails. A full score keeps one order of staves on every
+page: place fragments by that order, clef and stave count, and look at
+the pages that don't fit (`merge.json` `stack` for a grand stave read as
+two parts, `drop` for a part read from text). Drum parts suffer most:
 `"drum_grooves"` in `merge.json` writes a whole groove into every bar whose
 kick and snare match (`repair.py --help`). Look at every bar you patch.

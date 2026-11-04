@@ -36,6 +36,17 @@ page is reported LOST. Finished chunks are kept in `omr/chunks/`, so a run
 that is stopped carries on where it left off. `keep_reading.py` reruns
 `process.py` after each interruption, for reads left unattended.
 
+## Pages with the wrong number of bars
+
+On a dense scan Audiveris splits a page's one system into several, read
+end to end, or misses or invents a bar line, and which it does depends on
+the scale. With `library/<piece>/printed-bars.json` (each page's first and
+last printed bar number, `{"12": [48, 51]}`, read off the pages), each page
+is read on its own, and a page whose bars don't match is read again at 330,
+360, 400 and 300 DPI. One that still doesn't match is put right by
+`pagefix.py`: a double bar split, an empty bar dropped, systems folded back
+into one. Each page's outcome is in `omr/chunks/<read>/progress.txt`.
+
 ## Reading the PDF's own drawing
 
 A PDF exported from notation software is a drawing, not pixels: every
@@ -121,6 +132,8 @@ call:
 | `"drum_grooves": {...}` | Writes whole kit grooves (hi-hats included, which Audiveris misses) into the bars whose kick and snare match, or into listed bars; see `repair.py --help` |
 | `"combine": [{"parts": ["Harp", "Piano"], "name": "Harp & Piano"}]` | Two parts onto one part's staves, to fit a template with fewer staves: the same notes written once, different notes as two voices. It copies written pitch as it is, so both parts must be in the same transposition |
 | `"labels": {"Double Bass": {"abbreviation": "D.B.", "program": 44}}` | A part's abbreviation and playback sound (General MIDI program), where the built-in table in `repair.py` gets them wrong |
+| `"stack": [["P312", "P313"]]` | A grand stave Audiveris read as two single-stave parts: the second goes on the first as its stave 2. Name the first in `aliases` |
+| `"drop": ["P12"]` | A part read from something that isn't music (a line of text): taken out, its notes reported |
 | `"borrow_rests": false` | Turns off putting back rests a short bar is missing, copied from a matching bar elsewhere |
 | `"drawing_check": false` | Turns off checking and correcting against the PDF's drawing |
 | `"doublings": false` | Turns off filling bars from the parts that double them |
@@ -147,6 +160,7 @@ articulations, noteheads, directions) changed.
 | `audiveris.py` | Runs Audiveris headless, state in `tmp/audiveris-home/` |
 | `book.py` | Reads a PDF in chunks: retries, splits, resumes, joins |
 | `keep_reading.py` | Reruns `process.py` after interruptions, for a read left alone |
+| `pagefix.py` | Puts right a page read with the wrong number of bars |
 | `pages.py` | `merge`, `images`, `rerender`, `split`: getting pages into one readable PDF |
 | `score.py` | `check`, `names` and `diff` for any `.mxl` |
 | `draft.py` | Drafts `merge.json` from a read |
