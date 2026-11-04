@@ -17,7 +17,16 @@ Config (score.py names lists the raw names):
   "aliases": {"Fl.": "Flute", "F1.": "Flute", "Flute": "Flute", "Ob.": "Oboe"}
 }
 A name not in aliases, or mapped to null, stays its own part; nothing is
-dropped. A key may also be a part id from names.txt ("P23": "Marimba"): an
+dropped.
+
+  "drop": ["P12", ...]                                optional, applied first
+A part Audiveris read from something that isn't music (text, a smudge):
+taken out, its notes reported as dropped.
+
+  "stack": [["P312", "P313"], ...]                    optional, after drop
+A grand stave Audiveris read as two single-stave parts: the second (lower)
+part's bars go on the first's as its stave 2, and the second part is
+dropped. Name the first in aliases. A key may also be a part id from names.txt ("P23": "Marimba"): an
 id wins over its name, for the names Audiveris gives to several different
 staves (an unread name comes out as "Voice").
 
@@ -40,6 +49,7 @@ import copy
 import json
 import sys
 import xml.etree.ElementTree as ET
+from fractions import Fraction
 from pathlib import Path
 
 import score
@@ -222,10 +232,135 @@ def merge(root: ET.Element, canonical_order: list[str],
     return ok, report
 
 
+# MusicXML's order inside <note>: <staff> comes before these.
+_AFTER_STAFF = ("beam", "notations", "lyric", "play", "listen")
+
+
+def _set_staff(element: ET.Element, staff: str) -> None:
+    old = element.find("staff")
+    if old is not None:
+        old.text = staff
+        return
+    new = ET.Element("staff")
+    new.text = staff
+    if element.tag == "direction":
+        position = next((i for i, c in enumerate(element) if c.tag == "sound"), len(element))
+    else:
+        position = next((i for i, c in enumerate(element) if c.tag in _AFTER_STAFF), len(element))
+    element.insert(position, new)
+
+
+def _end_cursor(measure: ET.Element) -> int:
+    cursor = 0
+    for element in measure:
+        duration = int(float(element.findtext("duration") or 0))
+        if element.tag == "backup":
+            cursor -= duration
+        elif element.tag == "forward" or (element.tag == "note" and element.find("chord") is None
+                                          and element.find("grace") is None):
+            cursor += duration
+    return cursor
+
+
+def stack_staves(root: ET.Element, pairs: list[list[str]]) -> list[str]:
+    """For each [upper, lower] pair of part ids, single-stave fragments that
+    Audiveris read for one grand stave's two staves: put the lower's bars on
+    the upper's part as its stave 2 (voices 5 up), and drop the lower part."""
+    parts = {p.get("id"): p for p in root.findall("part")}
+    part_list = root.find("part-list")
+    report = []
+    for upper_id, lower_id in pairs:
+        if upper_id not in parts or lower_id not in parts:
+            raise ValueError(f"stack names no part {upper_id if upper_id not in parts else lower_id!r}")
+        upper, lower = parts[upper_id], parts[lower_id]
+        if any((a.findtext("staves") or "1") != "1" for a in upper.iter("attributes")):
+            raise ValueError(f"stack: {upper_id} already has more than one stave")
+        u_states, l_states = attribute_states(upper), attribute_states(lower)
+        moved = 0
+        for index, (um, lm) in enumerate(zip(upper.findall("measure"), lower.findall("measure"))):
+            for element in um:
+                if element.tag in ("note", "forward", "direction"):
+                    _set_staff(element, "1")
+            for attributes in um.findall("attributes"):
+                for clef in attributes.findall("clef"):
+                    clef.set("number", "1")
+            if index == 0:
+                attributes = um.find("attributes")
+                if attributes is None:
+                    attributes = ET.Element("attributes")
+                    um.insert(sum(1 for c in um if c.tag == "print"), attributes)
+                staves = ET.Element("staves")
+                staves.text = "2"
+                position = next((i for i, c in enumerate(attributes)
+                                 if c.tag in ("part-symbol", "instruments", "clef", "staff-details",
+                                              "transpose")), len(attributes))
+                attributes.insert(position, staves)
+                clef = _end_state(l_states[0], lm).get(("clef", "1"))
+                if clef is not None:
+                    clef = copy.deepcopy(clef)
+                    clef.set("number", "2")
+                    last_clef = max((i for i, c in enumerate(attributes) if c.tag == "clef"), default=None)
+                    attributes.insert(last_clef + 1 if last_clef is not None else len(attributes), clef)
+            content = [c for c in lm if c.tag in ("note", "backup", "forward", "direction")]
+            if not any(c.tag == "note" for c in content):
+                continue
+            u_div = _end_state(u_states[index], um).get(("divisions", "1"))
+            l_div = _end_state(l_states[index], lm).get(("divisions", "1"))
+            scale = Fraction(int(u_div.text), int(l_div.text)) if u_div is not None and l_div is not None \
+                else Fraction(1)
+            cursor = _end_cursor(um)
+            if cursor:
+                backup = ET.SubElement(um, "backup")
+                ET.SubElement(backup, "duration").text = str(cursor)
+            for element in content:
+                element = copy.deepcopy(element)
+                duration = element.find("duration")
+                if duration is not None:
+                    value = Fraction(duration.text) * scale
+                    duration.text = str(int(value)) if value.denominator == 1 else str(float(value))
+                voice = element.find("voice")
+                if voice is not None and voice.text and voice.text.isdigit():
+                    voice.text = str(int(voice.text) + 4)
+                if element.tag != "backup":
+                    _set_staff(element, "2")
+                um.append(element)
+                moved += element.tag == "note" and element.find("rest") is None
+        root.remove(lower)
+        entry = next(sp for sp in part_list.iter("score-part") if sp.get("id") == lower_id)
+        for container in part_list.iter():
+            if entry in list(container):
+                container.remove(entry)
+                break
+        report.append(f"{lower_id} put on {upper_id} as its stave 2: {moved} notes")
+    return report
+
+
+def drop_parts(root: ET.Element, pids: list[str]) -> list[str]:
+    """Take out parts Audiveris read from something that isn't music (a line
+    of text, a smudge). Report lines name each and the notes that went."""
+    parts = {p.get("id"): p for p in root.findall("part")}
+    part_list = root.find("part-list")
+    report = []
+    for pid in pids:
+        if pid not in parts:
+            raise ValueError(f"drop names no part {pid!r}")
+        report.append(f"dropped {pid}: {score.count_part_notes(parts[pid])} notes (merge.json \"drop\")")
+        root.remove(parts[pid])
+        for container in part_list.iter():
+            entry = next((sp for sp in container if sp.tag == "score-part" and sp.get("id") == pid), None)
+            if entry is not None:
+                container.remove(entry)
+                break
+    return report
+
+
 def merge_file(source: Path, out: Path, config: Path) -> tuple[bool, list[str]]:
     table = json.loads(config.read_text(encoding="utf-8"))
     root = score.load(source)
+    report_stack = drop_parts(root, table.get("drop") or [])
+    report_stack += stack_staves(root, table.get("stack") or [])
     ok, report = merge(root, table["canonical_order"], table["aliases"])
+    report = report_stack + report
     if ok:
         score.save(root, out, like=source)
     return ok, report

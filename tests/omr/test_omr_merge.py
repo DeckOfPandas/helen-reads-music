@@ -45,6 +45,36 @@ def test_fragments_become_one_part_in_order():
     assert report[-1] == "notes in 32, out 32: conserved"
 
 
+def test_a_grand_stave_read_as_two_parts_is_stacked():
+    upper = part("P1", [bar(four_crotchets("C5"), 1, attributes()), bar(four_crotchets("D5"), 2)])
+    lower = part("P2", [bar([("C3", 2), ("G2", 2)], 1, attributes(clef="F", divisions=8), divisions=8),
+                        bar(whole_rest(), 2, divisions=8)])
+    root = ET.fromstring(make_score([("P1", "Piano", upper), ("P2", "Piano", lower)]))
+    report = merge.stack_staves(root, [["P1", "P2"]])
+    assert report == ["P2 put on P1 as its stave 2: 2 notes"]
+    assert [pid for pid, _ in score.part_names(root)] == ["P1"]
+    piano = root.find("part")
+    first = piano.find("measure")
+    assert first.findtext("attributes/staves") == "2"
+    assert [(c.get("number"), c.findtext("sign")) for c in first.findall("attributes/clef")] == \
+        [("1", "G"), ("2", "F")]
+    low = [n for n in first.findall("note") if n.findtext("staff") == "2"]
+    assert [(n.findtext("pitch/step"), n.findtext("duration"), n.findtext("voice")) for n in low] == \
+        [("C", "8", "5"), ("G", "8", "5")]                 # durations in the upper part's divisions
+    assert first.find("backup/duration").text == "16"
+    assert score.bad_bars(piano) == []
+    with pytest.raises(ValueError, match="already has more than one stave"):
+        merge.stack_staves(root, [["P1", "P1"]])
+
+
+def test_a_part_read_from_text_is_dropped(tmp_path):
+    root = fragmented()
+    assert merge.drop_parts(root, ["P3"]) == ['dropped P3: 16 notes (merge.json "drop")']
+    assert [pid for pid, _ in score.part_names(root)] == ["P1", "P2"]
+    with pytest.raises(ValueError, match="drop names no part 'P9'"):
+        merge.drop_parts(root, ["P9"])
+
+
 def test_a_bar_from_another_fragment_brings_its_divisions():
     root = fragmented(second_divisions=2)
     ok, report = merge.merge(root, ["Flute", "Oboe"], {"Fl.": "Flute", "Flute": "Flute", "Ob.": "Oboe"})
