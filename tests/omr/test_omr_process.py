@@ -86,7 +86,7 @@ def test_a_pdf_piece_is_read_and_reported(tmp_path):
     assert pdf == chunk / "pages-001-002.pdf"
     with pymupdf.open(pdf) as doc:
         assert len(doc) == 2
-    assert fake.calls[0][:5] == ["-batch", "-export", "-save", "-output", str(chunk)]
+    assert fake.calls[0][:4] == ["-batch", "-export", "-output", str(chunk)]
     report = (out / "report.txt").read_text()
     assert "bar 2: 3 crotchets of 4 crotchets (short)" in report
     assert (out / "names.txt").read_text() == "P1 | Fl.\nP2 | Flute\n"

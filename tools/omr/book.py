@@ -43,8 +43,6 @@ import audiveris
 import pages
 import score
 
-# Past about 5 pages of 20 MP, Audiveris swaps sheets out to its .omr book
-# and fails to load them back (FileSystemAlreadyExistsException).
 CHUNK_PAGES = 5
 # Crashes depend on a page's geometry in pixels; 7% smaller is a different
 # page to Audiveris and still close to the resolution asked for.
@@ -151,8 +149,11 @@ def read_pages(pdf: Path, numbers: list[int], folder: Path, dpi: int | None, run
             pages.rerender(source, book_pdf, dpi or AS_DRAWN_DPI, page_dpi=page_dpi)
         for old in folder.glob("*.mxl"):
             old.unlink()
+        # No -save: Audiveris keeps its .omr book up to date as it goes, and
+        # the final save races export's reloading of the sheets from it
+        # (FileSystemAlreadyExistsException), failing most books of 5 pages.
         with open(log, "w", encoding="utf-8") as handle:
-            code = run(["-batch", "-export", "-save", "-output", str(folder), "--", str(book_pdf)], log=handle)
+            code = run(["-batch", "-export", "-output", str(folder), "--", str(book_pdf)], log=handle)
         # Killed by a signal: a negative status, or 128 + the signal when
         # Java catches it (SIGTERM exits 143).
         if code is not None and (code < 0 or code >= 128):
