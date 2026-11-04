@@ -74,14 +74,16 @@ not run again unless you pass `--force`. Later runs only redo the merge and
 checks, which is far quicker.
 
 Audiveris reads five pages at a time (`book.py`), and every finished chunk
-is kept. For any read longer than a few minutes, don't run `process.py`
-directly; start the runner in its own session:
+is kept. For any read longer than a few minutes, run the runner as a
+background command (Bash `run_in_background`), not `process.py` itself, and
+never through `setsid`, `nohup` or `&`, which the permission checker cannot
+analyse:
 
-    setsid --fork python3 tools/omr/keep_reading.py library/<piece> [--time 2/2] [--force]
+    python3 tools/omr/keep_reading.py library/<piece> [--time 2/2] [--force]
 
-Claude Code stops background shells when memory runs short, and a detached
-runner survives that. It also reruns `process.py` after each interruption,
-carrying on from the last chunk. Watch `omr/keep-reading.status` and
+It reruns `process.py` after each interruption, carrying on from the last
+chunk. Claude Code may still stop the runner itself when memory runs short:
+start it again, without `--force`. Watch `omr/keep-reading.status` and
 `omr/chunks/*/progress.txt`.
 
 If you find `omr/chunks/` with no finished `omr/<piece>.mxl`, a read was

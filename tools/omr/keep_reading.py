@@ -18,11 +18,10 @@ It writes, in library/<piece>/omr/:
                         or gave up, with the time; a reader polls this
   keep-reading.log      everything process.py printed, run by run
 
-To leave it running past this shell (a Claude Code session can be stopped
-under memory pressure), start it in its own session:
-    setsid --fork python3 tools/omr/keep_reading.py library/<piece> ...
-If the container itself stops, start it again the same way, without
---force: it carries on from the chunks already read.
+Claude Code runs it as an ordinary background command. If that shell is
+stopped (Claude Code stops background shells when memory runs short) or the
+container stops, start it again the same way, without --force: it carries
+on from the chunks already read.
 """
 from __future__ import annotations
 
