@@ -153,8 +153,11 @@ def read_pages(pdf: Path, numbers: list[int], folder: Path, dpi: int | None, run
             old.unlink()
         with open(log, "w", encoding="utf-8") as handle:
             code = run(["-batch", "-export", "-save", "-output", str(folder), "--", str(book_pdf)], log=handle)
-        if code is not None and code < 0:
-            raise Interrupted(f"Audiveris was killed (signal {-code}) reading {_span(numbers)}")
+        # Killed by a signal: a negative status, or 128 + the signal when
+        # Java catches it (SIGTERM exits 143).
+        if code is not None and (code < 0 or code >= 128):
+            signal = -code if code < 0 else code - 128
+            raise Interrupted(f"Audiveris was killed (signal {signal}) reading {_span(numbers)}")
         made = sorted(folder.glob(f"{stem}*.mxl"), key=pages.page_order)
         if made:
             result = Result(made, [], [log])

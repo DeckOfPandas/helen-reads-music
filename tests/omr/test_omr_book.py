@@ -27,9 +27,9 @@ class FakeReader:
     Java runs out of heap. `kill_on` (a call number, from 1) is killed by a
     signal."""
 
-    def __init__(self, crash=(), always=(), oom=(), kill_on=None, refuse=False):
+    def __init__(self, crash=(), always=(), oom=(), kill_on=None, killed_with=-9, refuse=False):
         self.crash, self.always, self.oom = set(crash), set(always), set(oom)
-        self.kill_on, self.refuse = kill_on, refuse
+        self.kill_on, self.killed_with, self.refuse = kill_on, killed_with, refuse
         self.calls: list[tuple[int, int]] = []
 
     def __call__(self, args, log=None):
@@ -37,7 +37,7 @@ class FakeReader:
         first, last = map(int, re.findall(r"\d+", pdf.stem))
         self.calls.append((first, last))
         if len(self.calls) == self.kill_on:
-            return -9
+            return self.killed_with
         if self.refuse:
             log.write("Sheet#1 too low interline value of 10 pixels\n")
             return 0
@@ -119,6 +119,12 @@ def test_an_interrupted_read_carries_on_where_it_stopped(tmp_path):
     read = book.read_book(pdf, tmp_path / "read", "piece", run=again, chunk_pages=2)
     assert again.calls == [(3, 4), (5, 5)]          # pages 1-2 were finished and kept
     assert len(score.part_names(score.load(read.mxl))) == 3
+
+
+def test_java_stopped_by_sigterm_is_an_interruption_not_a_failure(tmp_path):
+    with pytest.raises(book.Interrupted, match="signal 15"):
+        book.read_book(a_pdf(tmp_path, 2), tmp_path / "read", "piece", run=FakeReader(kill_on=1, killed_with=143))
+    assert not list((tmp_path / "read").rglob("done.json"))
 
 
 def test_a_refused_resolution_stops_the_read_for_the_caller(tmp_path):
