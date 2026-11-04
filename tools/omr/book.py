@@ -231,6 +231,19 @@ def read_page_checked(pdf: Path, page: int, folder: Path, dpi: int | None, run, 
         miss, each, got, result = min(tries, key=lambda t: t[0])
         tried = ", ".join(f"{d or 'drawn'}: {g}" for _, d, g, _ in tries)
         verdict = "matches" if not miss else "CLOSEST, does NOT match"
+        if miss and len(result.mxls) == 1:
+            import pagefix
+            root = score.load(result.mxls[0])
+            try:
+                fixes = pagefix.fix_page(root, want)
+            except ValueError as err:
+                verdict += f"; pagefix could not: {err}"
+            else:
+                fixed = folder / "fixed.mxl"
+                folder.mkdir(parents=True, exist_ok=True)
+                score.save(root, fixed)
+                result = Result([fixed], result.lost, result.logs)
+                verdict += f"; FIXED to {want} bars by pagefix: {'; '.join(fixes)}"
         _progress(top, f"page {page}: {got} bars at {each or 'as drawn'} DPI, printed {want}, "
                        f"{verdict} (tried {tried})")
     _save_done(folder, result)
@@ -323,7 +336,7 @@ def join_scores(paths: list[Path], out: Path) -> None:
             old, new = entry.get("id"), f"P{serial}"
             part = copy.deepcopy(parts[old])
             part.set("id", new)
-            for element in [entry, *entry.iter(), *part.iter("instrument")]:
+            for element in [*entry.iter(), *part.iter("instrument")]:      # iter() includes entry
                 ident = element.get("id")
                 if ident == old:
                     element.set("id", new)
