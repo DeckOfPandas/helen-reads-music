@@ -90,6 +90,7 @@ def test_a_page_that_crashes_is_drawn_smaller_and_read_again(tmp_path):
     with pymupdf.open(tmp_path / "read" / "p001-005" / "pages-001-005.pdf") as doc:
         assert round(doc[3].rect.width / doc[0].rect.width, 2) == book.CRASH_SHRINK
     assert "Audiveris crashed on page(s) [4]" in (tmp_path / "read" / "progress.txt").read_text()
+    assert "Error processing stub" in (tmp_path / "read" / "p001-005" / "audiveris-attempt1.log").read_text()
 
 
 def test_a_page_that_always_fails_is_lost_alone(tmp_path):

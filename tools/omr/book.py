@@ -140,7 +140,9 @@ def read_pages(pdf: Path, numbers: list[int], folder: Path, dpi: int | None, run
     stem = f"pages-{numbers[0]:03d}-{numbers[-1]:03d}"
     book_pdf, log = folder / f"{stem}.pdf", folder / "audiveris.log"
     page_dpi: dict[int, int] = {}
-    for _ in range(1 + CRASH_RETRIES):
+    for attempt in range(1, 2 + CRASH_RETRIES):
+        if attempt > 1:                         # keep the failed attempt's log
+            log.rename(folder / f"audiveris-attempt{attempt - 1}.log")
         if dpi is None and not page_dpi:
             shutil.copy(source, book_pdf)
         else:
