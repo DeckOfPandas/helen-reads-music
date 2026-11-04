@@ -21,12 +21,20 @@ merge.json are about it. After the merge, its bars that do not add up are
 taken from the 300 DPI read where that one's add up (combine.py).
 --single skips the sharper read.
 
+Audiveris reads the pages ten at a time (book.py), so a page it fails on
+costs at most that page, and an interrupted run loses nothing finished: run
+it again without --force and it carries on from the chunks in chunks/. When
+Audiveris is killed from outside (memory, the container stopping), the exit
+status is 3.
+
 Everything made goes in library/<piece>/omr/:
   sharp/<piece>.mxl             the sharper read (the primary, when it worked)
-  sharp/audiveris.log           its log; audiveris-<dpi>dpi-failed.log for each
-                                resolution Audiveris failed at
+  sharp/audiveris.log           its log
   <piece>.mxl                   the 300 DPI read
-  <piece>.omr                   Audiveris's own book, to open in its editor
+  chunks/                       every read, chunk by chunk (book.py): the
+                                PDFs, logs, scores and Audiveris's own .omr
+                                books, to open in its editor; progress.txt in
+                                each read's folder says what finished when
   report.txt                    score.py check: parts, and bars that do not add up
   names.txt                     every part name Audiveris gave
   merge.draft.json              merge.json drafted from the read (draft.py): which
@@ -46,15 +54,13 @@ Everything made goes in library/<piece>/omr/:
                                 that double each other and the bars filled
                                 from a double (doublings.py); the check of the
                                 result
-  audiveris.log                 the full Audiveris log
-  work/                         the PDF handed to Audiveris
+  audiveris.log                 the 300 DPI read's Audiveris log, all chunks
+  work/                         the piece as one PDF
 
 When Audiveris rejects a sheet as too low resolution ("too low interline
 value of N pixels") or too large ("Too large image"), the PDF is
 re-rendered at a DPI that fixes it (pages.py rerender) and read once more.
-When Audiveris crashes on a page, it exports nothing for the whole book: the
-pages it crashed on are drawn 7% smaller and the book read again, up to three
-times.
+A page Audiveris crashes on is drawn smaller and read again (book.py).
 
 A piece whose <piece>.mxl exists is not read again unless --force; a new or
 changed merge.json is still applied.
@@ -69,6 +75,7 @@ import sys
 from pathlib import Path
 
 import audiveris
+import book
 import combine
 import doublings
 import draft
@@ -84,12 +91,9 @@ SHARP = "sharp"
 # symbols (quaver rests, time signatures). Some page geometries crash it at
 # one resolution and not another, hence a ladder rather than one target.
 SHARP_TARGETS = (18, 17, 16, 15)
-
-# One sheet Audiveris crashes on ("Error processing stub") stops it exporting
-# the whole book. The crashes depend on the page's geometry in pixels, so the
-# page alone is drawn this much smaller and the book read again, a few times.
-CRASH_SHRINK = 0.93
-CRASH_RETRIES = 3
+CHUNKS = "chunks"
+INTERRUPTED = 3                        # exit status: Audiveris was killed; running again carries on
+SHARP_DONE = "sharp-done.txt"          # in CHUNKS: the sharper read has finished, one way or another
 
 
 def slug(name: str) -> str:
@@ -125,38 +129,6 @@ def build_pdf(piece: Path, work: Path, out: Path) -> None:
     pages.images_to_pdf(images, out)
 
 
-def diagnose(log: Path) -> dict:
-    text = log.read_text(errors="replace") if log.is_file() else ""
-    low = [int(n) for n in re.findall(r"too low interline value of (\d+) pixels", text)]
-    return {"low_interline": min(low) if low else None, "too_large": "Too large image" in text}
-
-
-def fix_dpi(found: dict) -> int | None:
-    """The DPI to re-render at: aims the interline at 20 px, from the 300 DPI
-    Audiveris read it at. 300 for a too-large page, which pages.rerender caps."""
-    if found["low_interline"]:
-        return int(300 * 20 / found["low_interline"])
-    if found["too_large"]:
-        return 300
-    return None
-
-
-def read_with_audiveris(pdf: Path, out: Path, log: Path, run=audiveris.run) -> list[Path]:
-    # A score left from an earlier read would pass for this one's output.
-    for old in out.glob("*.mxl"):
-        old.unlink()
-    with open(log, "w", encoding="utf-8") as handle:
-        run(["-batch", "-export", "-save", "-output", str(out), "--", str(pdf)], log=handle)
-    return sorted(out.glob(f"{pdf.stem}*.mxl"))
-
-
-def crashed_sheets(log: Path) -> list[int]:
-    """The sheets (pages, from 1) Audiveris failed on with an exception."""
-    text = log.read_text(errors="replace") if log.is_file() else ""
-    found = re.findall(r"\[[^\]\s]*#(\d+)\]\s+Book\s+\d+\s+\|\s+Error processing stub", text)
-    return sorted({int(n) for n in found})
-
-
 def interline(log: Path) -> int | None:
     """The smallest typical staff-line spacing Audiveris measured on any sheet."""
     text = log.read_text(errors="replace") if log.is_file() else ""
@@ -164,10 +136,24 @@ def interline(log: Path) -> int | None:
     return min(found) if found else None
 
 
+def first_read(pdf: Path, out: Path, name: str, run) -> tuple[book.Book, int, list[str]]:
+    """The 300 DPI read, in chunks (book.py); at the DPI that fixes it if
+    Audiveris refuses the resolution. (book, DPI read at, notes)."""
+    chunks = out / CHUNKS
+    read = book.read_book(pdf, chunks / "first", name, None, run)
+    if not read.refused_dpi:
+        return read, book.AS_DRAWN_DPI, read.notes
+    dpi = read.refused_dpi
+    notes = [f"Audiveris refused the resolution; reading at up to {dpi} DPI"]
+    read = book.read_book(pdf, chunks / f"first-{dpi}dpi", name, dpi, run)
+    return read, dpi, notes + read.notes
+
+
 def sharp_read(pdf: Path, out: Path, measured: int, read_dpi: int, name: str,
-               run=audiveris.run) -> tuple[Path | None, list[str]]:
+               lost: list[int], run=audiveris.run) -> tuple[Path | None, list[str]]:
     """Read again at the DPI that puts the interline at SHARP_TARGETS, trying
-    each in turn until Audiveris succeeds. (score or None, notes)."""
+    each in turn until Audiveris reads every page the first read did.
+    (score or None, notes)."""
     sharp = out / SHARP
     sharp.mkdir(exist_ok=True)
     notes = []
@@ -177,26 +163,25 @@ def sharp_read(pdf: Path, out: Path, measured: int, read_dpi: int, name: str,
         if dpi < read_dpi * 1.1:
             notes.append(f"interline already {measured} px; no sharper read needed")
             return None, notes
-        render = out / "work" / f"{name}-{dpi}.pdf"
-        rendered = pages.rerender(pdf, render, dpi)
-        size = tuple(line.split(" at ")[0] for line in rendered)
-        if size in tried:                       # capped to a size already tried
+        sizes = tuple(pages.rendered_dpis(pdf, dpi).values())
+        if sizes in tried:                      # capped to a size already tried
             continue
-        tried.add(size)
-        made = read_with_audiveris(render, sharp, sharp / "audiveris.log", run)
-        if made:
+        tried.add(sizes)
+        read = book.read_book(pdf, out / CHUNKS / f"sharp-{dpi}dpi", name, dpi, run)
+        if read.mxl and read.lost == lost:
             target_mxl = sharp / f"{name}.mxl"
-            made[0].rename(target_mxl)
+            shutil.copy(read.mxl, target_mxl)
+            shutil.copy(read.log, sharp / "audiveris.log")
             notes.append(f"sharper read at {dpi} DPI (aiming for {target} px interline): {SHARP}/{name}.mxl")
             return target_mxl, notes
-        failed_log = sharp / f"audiveris-{dpi}dpi-failed.log"
-        (sharp / "audiveris.log").rename(failed_log)
-        notes.append(f"at {dpi} DPI Audiveris failed; log kept as {SHARP}/{failed_log.name}")
+        notes.append(f"at {dpi} DPI Audiveris lost page(s) {read.lost}; log kept as "
+                     f"{read.log.relative_to(out)}")
     return None, notes
 
 
-def process(piece: Path, force: bool = False, run=audiveris.run,
+def process(piece: Path, force: bool = False, run=None,
             assume_time=None, sharp: bool = True) -> tuple[bool, list[str]]:
+    run = run or audiveris.run
     name = slug(piece.name)
     out = piece / OUT
     out.mkdir(exist_ok=True)
@@ -205,42 +190,39 @@ def process(piece: Path, force: bool = False, run=audiveris.run,
     sharp_mxl = out / SHARP / f"{name}.mxl"
     notes: list[str] = []
 
-    if mxl.exists() and not force:
+    chunks = out / CHUNKS
+    if force:
+        for stale in (mxl, sharp_mxl):
+            if stale.exists():
+                stale.unlink()
+        if chunks.exists():
+            shutil.rmtree(chunks)
+    # A read stopped part-way left its finished chunks in CHUNKS: carry on.
+    sharp_pending = sharp and not sharp_mxl.exists() and chunks.is_dir() and not (chunks / SHARP_DONE).exists()
+    if mxl.exists() and not sharp_pending:
         notes.append("already read (--force to read again)")
     else:
-        if sharp_mxl.exists():
-            sharp_mxl.unlink()
         work = out / "work"
         pdf = work / f"{name}.pdf"
         try:
             build_pdf(piece, work, pdf)
         except ValueError as err:
             return False, [f"could not make a PDF: {err}"]
-        read_dpi = 300
-        made = read_with_audiveris(pdf, out, log, run)
-        if not made:
-            dpi = fix_dpi(diagnose(log))
-            if dpi:
-                notes.append(f"Audiveris refused the resolution; re-rendering at up to {dpi} DPI")
-                fixed = work / f"{name}-fixed.pdf"
-                notes.extend(pages.rerender(pdf, fixed, dpi))
-                read_dpi = dpi
-                made = _read_render(fixed, out, log, name, run)
-        made, crash_notes = _retry_crashed(made, pdf, out, log, name, read_dpi, run)
-        notes.extend(crash_notes)
-        made = [p for p in made if not p.stem.endswith("-merged")]
-        if not made:
+        read, read_dpi, read_notes = first_read(pdf, out, name, run)
+        notes.extend(read_notes)
+        if read.log:
+            shutil.copy(read.log, log)
+        if not read.mxl:
             return False, notes + [f"Audiveris made no MusicXML: read {log}"]
-        if mxl not in made:
-            notes.append(f"Audiveris split the book into {len(made)} movements: "
-                         f"{[p.name for p in made]}; the report covers the first")
-            mxl = made[0]
+        shutil.copy(read.mxl, mxl)
         measured = interline(log)
         if sharp and measured:
-            _, sharp_notes = sharp_read(pdf, out, measured, read_dpi, name, run)
+            _, sharp_notes = sharp_read(pdf, out, measured, read_dpi, name, read.lost, run)
             notes.extend(sharp_notes)
         elif sharp:
             notes.append("no interline in the Audiveris log; no sharper read")
+        chunks.mkdir(exist_ok=True)
+        (chunks / SHARP_DONE).write_text("\n".join(notes) + "\n", encoding="utf-8")
 
     # The sharper read, when there is one, is the one the table is written for.
     primary, second = (sharp_mxl, mxl) if sharp_mxl.exists() else (mxl, None)
@@ -313,38 +295,6 @@ def process(piece: Path, force: bool = False, run=audiveris.run,
     return True, notes
 
 
-def _read_render(render: Path, out: Path, log: Path, name: str, run) -> list[Path]:
-    """Read a re-rendered PDF; its scores are named for the piece."""
-    for path in read_with_audiveris(render, out, log, run):
-        path.rename(out / path.name.replace(render.stem, name))
-    return sorted(out.glob(f"{name}*.mxl"))
-
-
-def _retry_crashed(made: list[Path], pdf: Path, out: Path, log: Path, name: str,
-                   read_dpi: int, run) -> tuple[list[Path], list[str]]:
-    """While a read made nothing because sheets crashed, draw those pages
-    CRASH_SHRINK smaller and read the book again. (scores, notes)."""
-    notes: list[str] = []
-    page_dpi: dict[int, int] = {}
-    for _ in range(CRASH_RETRIES):
-        crashed = crashed_sheets(log)
-        if made or not crashed:
-            break
-        now = pages.rendered_dpis(pdf, read_dpi, page_dpi=page_dpi)
-        for sheet in crashed:
-            if sheet in now:
-                page_dpi[sheet] = round(now[sheet] * CRASH_SHRINK)
-        notes.append("Audiveris crashed on page(s) " + ", ".join(map(str, crashed)) + "; reading again with "
-                     + ", ".join(f"page {n} at {d} DPI" for n, d in sorted(page_dpi.items())))
-        render = out / "work" / f"{name}-retry.pdf"
-        pages.rerender(pdf, render, read_dpi, page_dpi=page_dpi)
-        made = _read_render(render, out, log, name, run)
-    if not made and crashed_sheets(log):
-        notes.append("Audiveris still crashes on page(s) "
-                     + ", ".join(map(str, crashed_sheets(log))) + f": read {log}")
-    return made, notes
-
-
 def _patched(table: dict) -> set[tuple[str, str]]:
     """(part, bar) for every bar merge.json patches by hand."""
     return {(part, bar) for part, bars in (table.get("patches") or {}).items() if not part.startswith("_")
@@ -413,7 +363,12 @@ def main(argv: list[str]) -> int:
             failed = True
             continue
         print(f"== {piece}", flush=True)
-        ok, notes = process(piece, args.force, assume_time=args.time, sharp=not args.single)
+        try:
+            ok, notes = process(piece, args.force, assume_time=args.time, sharp=not args.single)
+        except book.Interrupted as err:
+            print(f"   INTERRUPTED: {err}. Every finished chunk is kept: run again without --force "
+                  "to carry on.", flush=True)
+            return INTERRUPTED
         for note in notes:
             print(f"   {note}", flush=True)
         print(f"   {'done' if ok else 'FAILED'}: {piece / OUT}", flush=True)

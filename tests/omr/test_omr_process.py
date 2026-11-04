@@ -23,32 +23,44 @@ FRAGMENTS = make_score([
 ])
 
 
+def read_of(call: list[str]) -> str:
+    """Which read a call belongs to: the folder under chunks/ ("first",
+    "first-600dpi", "sharp-450dpi")."""
+    parts = Path(call[call.index("-output") + 1]).parts
+    return parts[parts.index("chunks") + 1]
+
+
 class FakeAudiveris:
-    """Records each call; writes FRAGMENTS (or `sharp_xml` for a re-rendered
-    PDF) as <pdf stem>.mxl, unless told to fail with a log line first or the
-    PDF's DPI is in `crash_at`. With `interline`, logs it the way Audiveris does."""
+    """Records each call; writes FRAGMENTS (or `sharp_xml` for the sharper
+    read) as <pdf stem>.mxl, unless told to fail with a log line first, or
+    the read's DPI is in `crash_at`, or the call (from 1) is `kill_on`. With
+    `interline`, logs it the way Audiveris does."""
 
     def __init__(self, fail_with: list[str] | None = None, interline: int | None = None,
-                 crash_at: tuple = (), sharp_xml: str | None = None):
+                 crash_at: tuple = (), sharp_xml: str | None = None, kill_on: int | None = None):
         self.fail_with = list(fail_with or [])
         self.interline = interline
         self.crash_at = {str(d) for d in crash_at}
         self.sharp_xml = sharp_xml
+        self.kill_on = kill_on
         self.calls: list[list[str]] = []
 
     def __call__(self, args, log=None):
         self.calls.append(args)
+        if len(self.calls) == self.kill_on:
+            return -9
         out, pdf = Path(args[args.index("-output") + 1]), Path(args[-1])
         if self.interline:
             log.write(f"INFO ScaleStep 65 | Scale{{ interline({self.interline},{self.interline},13) line(2,2,2) beam(7)}}\n")
         if self.fail_with:
             log.write(self.fail_with.pop(0) + "\n")
             return 0
-        dpi = pdf.stem.rsplit("-", 1)[-1]
+        label = read_of(args)
+        dpi = label.rsplit("-", 1)[-1].removesuffix("dpi")
         if dpi in self.crash_at:
             log.write("java.lang.NullPointerException\n")
             return 1
-        sharp = dpi.isdigit()
+        sharp = label.startswith("sharp-")
         write_mxl(out / f"{pdf.stem}.mxl", self.sharp_xml if sharp and self.sharp_xml else FRAGMENTS)
         return 0
 
@@ -69,11 +81,12 @@ def test_a_pdf_piece_is_read_and_reported(tmp_path):
     ok, notes = process.process(piece, run=fake)
     assert ok, notes
     out = piece / "omr"
+    chunk = out / "chunks" / "first" / "p001-002"
     pdf = Path(fake.calls[0][-1])
-    assert pdf == out / "work" / "under-the-sea.pdf"
+    assert pdf == chunk / "pages-001-002.pdf"
     with pymupdf.open(pdf) as doc:
         assert len(doc) == 2
-    assert fake.calls[0][:5] == ["-batch", "-export", "-save", "-output", str(out)]
+    assert fake.calls[0][:5] == ["-batch", "-export", "-save", "-output", str(chunk)]
     report = (out / "report.txt").read_text()
     assert "bar 2: 3 crotchets of 4 crotchets (short)" in report
     assert (out / "names.txt").read_text() == "P1 | Fl.\nP2 | Flute\n"
@@ -88,35 +101,27 @@ def test_a_low_interline_is_re_rendered_and_read_again(tmp_path):
     fake = FakeAudiveris(fail_with=["Sheet#1 too low interline value of 10 pixels"])
     ok, notes = process.process(piece, run=fake)
     assert ok, notes
-    assert len(fake.calls) == 2 and fake.calls[1][-1].endswith("under-the-sea-fixed.pdf")
-    assert any("re-rendering at up to 600 DPI" in n for n in notes)
+    assert len(fake.calls) == 2 and read_of(fake.calls[1]) == "first-600dpi"
+    assert any("reading at up to 600 DPI" in n for n in notes)
     assert (piece / "omr" / "under-the-sea.mxl").is_file()
 
 
-CRASH = "WARN  [under-the-sea#2]                      Book 2044 | Error processing stub java.lang.RuntimeException"
-
-
-def test_a_page_audiveris_crashes_on_is_drawn_smaller_and_read_again(tmp_path):
-    piece = piece_with_pdfs(tmp_path)
-    fake = FakeAudiveris(fail_with=[CRASH])
-    ok, notes = process.process(piece, run=fake)
+def test_an_interrupted_read_carries_on_without_force(tmp_path, capsys):
+    piece = piece_with_pdfs(tmp_path, count=1)
+    killed = FakeAudiveris(kill_on=1)
+    with pytest.raises(process.book.Interrupted):
+        process.process(piece, run=killed)
+    again = FakeAudiveris()
+    ok, notes = process.process(piece, run=again)
     assert ok, notes
-    retry = Path(fake.calls[1][-1])
-    assert retry.name == "under-the-sea-retry.pdf"
-    with pymupdf.open(retry) as doc:
-        first, second = doc[0].rect, doc[1].rect
-    assert round(second.width / first.width, 2) == 0.93
-    assert "Audiveris crashed on page(s) 2; reading again with page 2 at 279 DPI" in notes
-    assert (piece / "omr" / "under-the-sea.mxl").is_file()
+    assert len(again.calls) == 1 and (piece / "omr" / "under-the-sea.mxl").is_file()
 
 
-def test_a_page_that_always_crashes_is_named(tmp_path):
-    piece = piece_with_pdfs(tmp_path)
-    fake = FakeAudiveris(fail_with=[CRASH] * 5)
-    ok, notes = process.process(piece, run=fake)
-    assert not ok and len(fake.calls) == 1 + process.CRASH_RETRIES
-    assert any(n.startswith("Audiveris still crashes on page(s) 2") for n in notes)
-    assert "page 2 at 241 DPI" in notes[-3]
+def test_main_exits_3_when_audiveris_is_killed(tmp_path, monkeypatch, capsys):
+    piece = piece_with_pdfs(tmp_path, count=1)
+    monkeypatch.setattr(process.audiveris, "run", FakeAudiveris(kill_on=1))
+    assert process.main([str(piece)]) == process.INTERRUPTED
+    assert "INTERRUPTED" in capsys.readouterr().out
 
 
 def test_nothing_read_is_a_failure_that_names_the_log(tmp_path):
@@ -207,12 +212,11 @@ def test_a_sharper_read_steps_down_past_a_crash_and_becomes_primary(tmp_path):
     fake = FakeAudiveris(interline=12, crash_at=(450,))
     ok, notes = process.process(piece, run=fake)
     assert ok, notes
-    pdfs = [Path(c[-1]).name for c in fake.calls]
-    assert pdfs == ["under-the-sea.pdf", "under-the-sea-450.pdf", "under-the-sea-425.pdf"]
+    assert [read_of(c) for c in fake.calls] == ["first", "sharp-450dpi", "sharp-425dpi"]
     out = piece / "omr"
     assert (out / "sharp" / "under-the-sea.mxl").is_file()
-    assert (out / "sharp" / "audiveris-450dpi-failed.log").is_file()
-    assert any(n.startswith("at 450 DPI Audiveris failed") for n in notes)
+    assert "NullPointerException" in (out / "chunks" / "sharp-450dpi" / "audiveris.log").read_text()
+    assert "at 450 DPI Audiveris lost page(s) [1]; log kept as chunks/sharp-450dpi/audiveris.log" in notes
     assert any(n.startswith("sharper read at 425 DPI") for n in notes)
     assert "primary read: omr/sharp/under-the-sea.mxl; second read: omr/under-the-sea.mxl" in notes
 
@@ -243,7 +247,7 @@ def test_the_second_read_fills_the_primarys_bad_bars(tmp_path):
         def __call__(self, args, log=None):
             code = super().__call__(args, log)
             out, pdf = Path(args[args.index("-output") + 1]), Path(args[-1])
-            if not pdf.stem.rsplit("-", 1)[-1].isdigit():
+            if read_of(args) == "first":
                 write_mxl(out / f"{pdf.stem}.mxl", full)      # the 300 DPI read
             return code
 
@@ -269,4 +273,4 @@ def test_interline_reads_the_smallest_sheet(tmp_path):
     ({"low_interline": None, "too_large": False}, None),
 ])
 def test_fix_dpi(found, dpi):
-    assert process.fix_dpi(found) == dpi
+    assert process.book.fix_dpi(found) == dpi
