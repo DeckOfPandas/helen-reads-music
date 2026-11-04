@@ -189,9 +189,12 @@ def judge(part: ET.Element, assume: Fraction | None = None) -> tuple[list[BadBar
     expected = assume
     unjudged = 0
     bad = []
+    printed = True
     for measure in part.findall("measure"):
         cursor = longest = Fraction(0)
         voices: dict[str, Fraction] = {}
+        for details in measure.iter("staff-details"):
+            printed = details.get("print-object", "yes") != "no"
         for element in measure:
             if element.tag == "attributes":
                 if element.findtext("divisions"):
@@ -212,6 +215,11 @@ def judge(part: ET.Element, assume: Fraction | None = None) -> tuple[list[BadBar
                 voice = element.findtext("voice") or "1"
                 voices[voice] = voices.get(voice, Fraction(0)) + duration
             longest = max(longest, cursor)
+        # A bar with nothing in it on staves not printed is a fragment's
+        # padding where another fragment plays (book.join_scores, and
+        # Audiveris itself): there is nothing to judge.
+        if not printed and measure.find("note") is None:
+            continue
         if expected is None or divisions is None:
             unjudged += 1
             continue

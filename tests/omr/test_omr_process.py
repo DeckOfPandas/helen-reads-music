@@ -232,6 +232,17 @@ def test_a_sharper_read_steps_down_past_a_crash_and_becomes_primary(tmp_path):
     assert "primary read: omr/sharp/under-the-sea.mxl; second read: omr/under-the-sea.mxl" in notes
 
 
+def test_no_sharper_read_when_the_first_was_already_capped(tmp_path):
+    piece = piece_with_pdfs(tmp_path, count=1)
+    refused = "Sheet#1 too low interline value of 10 pixels"
+    fake = FakeAudiveris(fail_with=[refused], interline=12)
+    ok, notes = process.process(piece, run=fake)
+    assert ok, notes
+    # The 600 DPI fix is capped to 20 MP; a sharper read would be capped the same.
+    assert [read_of(c) for c in fake.calls] == ["first", "first-600dpi"]
+    assert "the first read was already at the largest pages Audiveris takes; no sharper read" in notes
+
+
 def test_no_sharper_read_when_the_first_is_already_sharp_or_single(tmp_path):
     piece = piece_with_pdfs(tmp_path, count=1)
     fake = FakeAudiveris(interline=19)
@@ -272,8 +283,11 @@ def test_the_second_read_fills_the_primarys_bad_bars(tmp_path):
 
 def test_interline_reads_the_smallest_sheet(tmp_path):
     log = tmp_path / "a.log"
-    log.write_text("Scale{ interline(12,13,13) x}\nScale{ interline(11,12,12) x}\n")
+    log.write_text("Scale{ interline(12,13,13) x}\nScale{ interline(11,12,12) x}\n"
+                   "Scale{ small_interline(9,9,9) interline(20,20,20) line(4,8,8)}\n")
     assert process.interline(log) == 12
+    log.write_text("Scale{ small_interline(16,16,16) interline(20,20,20) line(4,8,8)}\n")
+    assert process.interline(log) == 20
     assert process.interline(tmp_path / "none.log") is None
 
 

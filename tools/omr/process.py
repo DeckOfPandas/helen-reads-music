@@ -132,7 +132,8 @@ def build_pdf(piece: Path, work: Path, out: Path) -> None:
 def interline(log: Path) -> int | None:
     """The smallest typical staff-line spacing Audiveris measured on any sheet."""
     text = log.read_text(errors="replace") if log.is_file() else ""
-    found = [int(m) for m in re.findall(r"Scale\{ interline\(\d+,(\d+),\d+\)", text)]
+    # The line may start with small_interline(...) before interline(...).
+    found = [int(m) for m in re.findall(r"Scale\{[^}]*?\binterline\(\d+,(\d+),\d+\)", text)]
     return min(found) if found else None
 
 
@@ -163,7 +164,9 @@ def sharp_read(pdf: Path, out: Path, measured: int, read_dpi: int, name: str,
     sharp = out / SHARP
     sharp.mkdir(exist_ok=True)
     notes = []
-    tried = set()
+    # The first read's own page sizes: a sharper read capped back to them
+    # (pages.capped_dpi) would only read the same pixels again.
+    tried = {tuple(pages.rendered_dpis(pdf, read_dpi).values())}
     for target in SHARP_TARGETS:
         dpi = round(read_dpi * target / measured)
         if dpi < read_dpi * 1.1:
@@ -182,6 +185,8 @@ def sharp_read(pdf: Path, out: Path, measured: int, read_dpi: int, name: str,
             return target_mxl, notes
         notes.append(f"at {dpi} DPI Audiveris lost page(s) {read.lost}; log kept as "
                      f"{read.log.relative_to(out)}")
+    if not notes:
+        notes.append("the first read was already at the largest pages Audiveris takes; no sharper read")
     return None, notes
 
 

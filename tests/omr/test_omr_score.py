@@ -49,6 +49,15 @@ def test_time_signature_and_divisions_changes_are_followed():
     assert score.bad_bars(_part(bars)) == []
 
 
+def test_empty_bars_on_hidden_staves_are_not_judged():
+    hide = attributes().replace("</attributes>", '<staff-details print-object="no"/></attributes>')
+    show = '<attributes><staff-details print-object="yes"/></attributes>'
+    root = score.ET.fromstring(make_score([("P1", "Flute", part("P1", [
+        f'<measure number="1">{hide}</measure>', '<measure number="2"/>',
+        bar(four_crotchets(), 3, show), bar([("C4", 1)], 4)]))]))
+    assert [(b.number, b.holds) for b in score.bad_bars(root.find("part"))] == [("4", 1)]
+
+
 def test_a_pickup_bar_may_be_short_but_not_long():
     pickup = bar([("G4", 1)], 0, attributes(), implicit=True)
     assert score.bad_bars(_part([pickup, bar(four_crotchets(), 1)])) == []
