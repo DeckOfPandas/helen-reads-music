@@ -133,7 +133,8 @@ def _save_done(folder: Path, result: Result) -> None:
                                              "logs": rel(result.logs)}, indent=1))
 
 
-def read_pages(pdf: Path, numbers: list[int], folder: Path, dpi: int | None, run, top: Path) -> Result:
+def read_pages(pdf: Path, numbers: list[int], folder: Path, dpi: int | None, run, top: Path,
+               one_try: bool = False) -> Result:
     """Read pages `numbers` (from 1) of `pdf` as one book in `folder`, at
     `dpi`, or as drawn when None. Retries, splits and resumes as the module
     docstring says."""
@@ -185,7 +186,10 @@ def read_pages(pdf: Path, numbers: list[int], folder: Path, dpi: int | None, run
                        f"{[numbers[s - 1] for s in crashed]}; drawing them smaller")
     if len(numbers) == 1:
         result = Result([], list(numbers), [log])
-        _progress(top, f"page {numbers[0]} LOST: Audiveris fails on it at every size tried; see {log}")
+        if one_try:                             # read_page_checked tries other DPIs next
+            _progress(top, f"page {numbers[0]} failed at {dpi or 'as drawn'} DPI; see {log}")
+        else:
+            _progress(top, f"page {numbers[0]} LOST: Audiveris fails on it at every size tried; see {log}")
     else:
         half = len(numbers) // 2
         _progress(top, f"{_span(numbers)} failed as one book; reading each half alone")
@@ -213,7 +217,7 @@ def read_page_checked(pdf: Path, page: int, folder: Path, dpi: int | None, run, 
         return _load_done(folder)
     tries = []
     for each in [dpi] + [d for d in PAGE_LADDER if d != dpi]:
-        read = read_pages(pdf, [page], folder / f"at-{each or 'drawn'}", each, run, top)
+        read = read_pages(pdf, [page], folder / f"at-{each or 'drawn'}", each, run, top, one_try=True)
         if read.refused_dpi or not read.mxls:
             continue
         got = bar_count(read.mxls)
