@@ -25,6 +25,17 @@ sharper read is the primary, and `merge.json` is written for it. Where one
 of its bars does not add up, the bar comes from the 300 DPI read if that
 one's does (`combine.py`, which matches that read's parts itself).
 
+## Reading in chunks
+
+One page Audiveris crashes on stops it exporting the whole book, and a
+whole book is held in memory. So `book.py` reads ten pages at a time, each
+chunk its own book, and joins the chunks into one score shaped as a single
+read would be. A page that crashes is drawn 7% smaller and read again. A
+chunk that still fails is halved until only the bad page is left, and that
+page is reported LOST. Finished chunks are kept in `omr/chunks/`, so a run
+that is stopped carries on where it left off. `keep_reading.py` reruns
+`process.py` after each interruption, for reads left unattended.
+
 ## Reading the PDF's own drawing
 
 A PDF exported from notation software is a drawing, not pixels: every
@@ -108,6 +119,8 @@ call:
 | `"vocal_parts": ["Voice"]` | Parts whose lyrics are lyrics; elsewhere dynamics, accents and instructions Audiveris read as lyrics become marks again (the default is just "Voice") |
 | `"drum_key": {"F5 x": 51}` | Extra drum sounds by stave position and notehead; every drum note gets its instrument, hands stems up, feet stems down |
 | `"drum_grooves": {...}` | Writes whole kit grooves (hi-hats included, which Audiveris misses) into the bars whose kick and snare match, or into listed bars; see `repair.py --help` |
+| `"combine": [{"parts": ["Harp", "Piano"], "name": "Harp & Piano"}]` | Two parts onto one part's staves, to fit a template with fewer staves: the same notes written once, different notes as two voices. It copies written pitch as it is, so both parts must be in the same transposition |
+| `"labels": {"Double Bass": {"abbreviation": "D.B.", "program": 44}}` | A part's abbreviation and playback sound (General MIDI program), where the built-in table in `repair.py` gets them wrong |
 | `"borrow_rests": false` | Turns off putting back rests a short bar is missing, copied from a matching bar elsewhere |
 | `"drawing_check": false` | Turns off checking and correcting against the PDF's drawing |
 | `"doublings": false` | Turns off filling bars from the parts that double them |
@@ -132,6 +145,8 @@ articulations, noteheads, directions) changed.
 |---|---|
 | `process.py` | The whole run for a piece |
 | `audiveris.py` | Runs Audiveris headless, state in `tmp/audiveris-home/` |
+| `book.py` | Reads a PDF in chunks: retries, splits, resumes, joins |
+| `keep_reading.py` | Reruns `process.py` after interruptions, for a read left alone |
 | `pages.py` | `merge`, `images`, `rerender`, `split`: getting pages into one readable PDF |
 | `score.py` | `check`, `names` and `diff` for any `.mxl` |
 | `draft.py` | Drafts `merge.json` from a read |

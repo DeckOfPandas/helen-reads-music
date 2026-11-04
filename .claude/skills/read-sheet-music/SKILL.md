@@ -68,10 +68,25 @@ listed in `tools/omr/vector.py`'s docstring.
     python3 tools/omr/process.py library/<piece>
 
 This runs Audiveris twice: at 300 DPI, then sharper. That takes minutes per
-page (about 20 for a 23-page score), so run it in the background. It writes
-everything to `library/<piece>/omr/` (`process.py --help` lists the files).
-Audiveris is not run again unless you pass `--force`. Later runs only redo
-the merge and checks, which is far quicker.
+page (about 20 for a 23-page score). It writes everything to
+`library/<piece>/omr/` (`process.py --help` lists the files). Audiveris is
+not run again unless you pass `--force`. Later runs only redo the merge and
+checks, which is far quicker.
+
+Audiveris reads ten pages at a time (`book.py`), and every finished chunk
+is kept. For any read longer than a few minutes, don't run `process.py`
+directly; start the runner in its own session:
+
+    setsid --fork python3 tools/omr/keep_reading.py library/<piece> [--time 2/2] [--force]
+
+Claude Code stops background shells when memory runs short, and a detached
+runner survives that. It also reruns `process.py` after each interruption,
+carrying on from the last chunk. Watch `omr/keep-reading.status` and
+`omr/chunks/*/progress.txt`.
+
+If you find `omr/chunks/` with no finished `omr/<piece>.mxl`, a read was
+stopped part-way. Start the runner again *without* `--force`: `--force`
+deletes the chunks.
 
 ## 4. Which part is which instrument
 
@@ -90,6 +105,11 @@ save the table as `library/<piece>/merge.json`.
 Ask Helen, don't decide:
 - **`combine`:** how many staves her Sibelius template has, and which parts
   share one. `merge-report.txt` lists doublings, which are good candidates.
+  `combine` copies written pitch, so both parts must be in the same
+  transposition (horn in F with trombone in C would come out wrong). Before
+  proposing a pair, count the bars where they play different rhythms, and
+  check their ranges don't cross: two lines tangled on one stave are worse
+  than one stave more.
 - Anything on the page you can't read with confidence: an instrument's
   name, a transposition, a key change.
 
@@ -154,13 +174,31 @@ Say which of these you met.
 ## 7. Report to Helen
 
 Follow the end-of-work list in `CLAUDE.md`, and add:
-- where the merged score is;
+- where the merged score is: `omr/<piece>-merged.musicxml` is the one to
+  open in Sibelius;
 - bars that don't add up (0, or which and why);
 - what the drawing check fixed;
 - every bar you checked by eye, and what you found;
 - each hand patch and why no tool could do it;
 - anything you were unsure of, with a picture in `omr/views/bars/` she can
   open.
+
+## Traps already met
+
+- **Write scores with `score.save`, nothing else.** Audiveris labels its
+  files `version="4.0.3"`, its library's version, not MusicXML's, and
+  Sibelius then warns that the file is "an old version of MusicXML".
+  `score.save` writes 4.0 and the DOCTYPE. Anything that writes MusicXML
+  another way brings the warning back.
+- **A missing word may be unrecoverable.** The PDF draws its letters as
+  shapes and has no text layer, so a lyric Audiveris never read is gone
+  until someone patches it. Say which ones, with their bars.
+- **A green check is not a right score.** 0 bars that don't add up proves
+  the rhythms fill the bars, not that the notes are right. The drawing check
+  and your eye on the page are the proof.
+- **Removing patches or changing a tool moves marks as well as notes.**
+  `score.py diff` lists marks, lyrics and noteheads; check each one it
+  lists on the page, not just the notes.
 
 ## Scans
 
