@@ -445,6 +445,23 @@ def test_combining_two_parts_onto_one_stave():
     assert score.bad_bars(root.find("part")) == []
 
 
+def test_three_parts_combine_onto_one_stave_in_two_steps():
+    def line(*pitches):
+        return [bar(four_crotchets(p), n, attributes() if n == 1 else "") if p else bar(whole_rest(), n,
+                attributes() if n == 1 else "") for n, p in enumerate(pitches, start=1)]
+    root = build([("P1", "Voice 1", part("P1", line("C5", "E5", "G5"))),
+                  ("P2", "Voice 2", part("P2", line(None, "C5", "E5"))),
+                  ("P3", "Voice 3", part("P3", line(None, None, "C5")))])
+    repair.combine_parts(root, {"parts": ["Voice 1", "Voice 2"], "name": "Voice"})
+    repair.combine_parts(root, {"parts": ["Voice", "Voice 3"], "name": "Voice"})
+    assert [n for _, n in score.part_names(root)] == ["Voice"]
+    bars = root.find("part").findall("measure")
+    voices = [sorted({n.findtext("voice") for n in m.findall("note")}) for m in bars]
+    assert voices == [["1"], ["1", "2"], ["1", "2", "3"]]
+    assert sum(score.count_notes(m) for m in bars) == 4 + 8 + 12
+    assert score.bad_bars(root.find("part")) == []
+
+
 def test_a_label_is_written_only_where_the_state_changes():
     same = [bar(four_crotchets("C5"), n, attributes() if n == 1 else "") for n in (1, 2, 3)]
     root = _violins(same, [bar(four_crotchets("C5"), n, attributes() if n == 1 else "") for n in (1, 2, 3)])
