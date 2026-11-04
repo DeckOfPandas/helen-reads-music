@@ -93,6 +93,32 @@ def test_a_low_interline_is_re_rendered_and_read_again(tmp_path):
     assert (piece / "omr" / "under-the-sea.mxl").is_file()
 
 
+CRASH = "WARN  [under-the-sea#2]                      Book 2044 | Error processing stub java.lang.RuntimeException"
+
+
+def test_a_page_audiveris_crashes_on_is_drawn_smaller_and_read_again(tmp_path):
+    piece = piece_with_pdfs(tmp_path)
+    fake = FakeAudiveris(fail_with=[CRASH])
+    ok, notes = process.process(piece, run=fake)
+    assert ok, notes
+    retry = Path(fake.calls[1][-1])
+    assert retry.name == "under-the-sea-retry.pdf"
+    with pymupdf.open(retry) as doc:
+        first, second = doc[0].rect, doc[1].rect
+    assert round(second.width / first.width, 2) == 0.93
+    assert "Audiveris crashed on page(s) 2; reading again with page 2 at 279 DPI" in notes
+    assert (piece / "omr" / "under-the-sea.mxl").is_file()
+
+
+def test_a_page_that_always_crashes_is_named(tmp_path):
+    piece = piece_with_pdfs(tmp_path)
+    fake = FakeAudiveris(fail_with=[CRASH] * 5)
+    ok, notes = process.process(piece, run=fake)
+    assert not ok and len(fake.calls) == 1 + process.CRASH_RETRIES
+    assert any(n.startswith("Audiveris still crashes on page(s) 2") for n in notes)
+    assert "page 2 at 241 DPI" in notes[-3]
+
+
 def test_nothing_read_is_a_failure_that_names_the_log(tmp_path):
     piece = piece_with_pdfs(tmp_path, count=1)
     ok, notes = process.process(piece, run=FakeAudiveris(fail_with=["boom", "boom"]))

@@ -52,6 +52,9 @@ Everything made goes in library/<piece>/omr/:
 When Audiveris rejects a sheet as too low resolution ("too low interline
 value of N pixels") or too large ("Too large image"), the PDF is
 re-rendered at a DPI that fixes it (pages.py rerender) and read once more.
+When Audiveris crashes on a page, it exports nothing for the whole book: the
+pages it crashed on are drawn 7% smaller and the book read again, up to three
+times.
 
 A piece whose <piece>.mxl exists is not read again unless --force; a new or
 changed merge.json is still applied.
@@ -81,6 +84,12 @@ SHARP = "sharp"
 # symbols (quaver rests, time signatures). Some page geometries crash it at
 # one resolution and not another, hence a ladder rather than one target.
 SHARP_TARGETS = (18, 17, 16, 15)
+
+# One sheet Audiveris crashes on ("Error processing stub") stops it exporting
+# the whole book. The crashes depend on the page's geometry in pixels, so the
+# page alone is drawn this much smaller and the book read again, a few times.
+CRASH_SHRINK = 0.93
+CRASH_RETRIES = 3
 
 
 def slug(name: str) -> str:
@@ -139,6 +148,13 @@ def read_with_audiveris(pdf: Path, out: Path, log: Path, run=audiveris.run) -> l
     with open(log, "w", encoding="utf-8") as handle:
         run(["-batch", "-export", "-save", "-output", str(out), "--", str(pdf)], log=handle)
     return sorted(out.glob(f"{pdf.stem}*.mxl"))
+
+
+def crashed_sheets(log: Path) -> list[int]:
+    """The sheets (pages, from 1) Audiveris failed on with an exception."""
+    text = log.read_text(errors="replace") if log.is_file() else ""
+    found = re.findall(r"\[[^\]\s]*#(\d+)\]\s+Book\s+\d+\s+\|\s+Error processing stub", text)
+    return sorted({int(n) for n in found})
 
 
 def interline(log: Path) -> int | None:
@@ -209,10 +225,9 @@ def process(piece: Path, force: bool = False, run=audiveris.run,
                 fixed = work / f"{name}-fixed.pdf"
                 notes.extend(pages.rerender(pdf, fixed, dpi))
                 read_dpi = dpi
-                made = read_with_audiveris(fixed, out, log, run)
-                for path in made:
-                    path.rename(out / path.name.replace(f"{name}-fixed", name))
-                made = sorted(out.glob(f"{name}*.mxl"))
+                made = _read_render(fixed, out, log, name, run)
+        made, crash_notes = _retry_crashed(made, pdf, out, log, name, read_dpi, run)
+        notes.extend(crash_notes)
         made = [p for p in made if not p.stem.endswith("-merged")]
         if not made:
             return False, notes + [f"Audiveris made no MusicXML: read {log}"]
@@ -296,6 +311,38 @@ def process(piece: Path, force: bool = False, run=audiveris.run,
             notes.append("merge REFUSED: it would have lost notes; see merge-report.txt")
         (out / "merge-report.txt").write_text("\n".join(merge_report) + "\n", encoding="utf-8")
     return True, notes
+
+
+def _read_render(render: Path, out: Path, log: Path, name: str, run) -> list[Path]:
+    """Read a re-rendered PDF; its scores are named for the piece."""
+    for path in read_with_audiveris(render, out, log, run):
+        path.rename(out / path.name.replace(render.stem, name))
+    return sorted(out.glob(f"{name}*.mxl"))
+
+
+def _retry_crashed(made: list[Path], pdf: Path, out: Path, log: Path, name: str,
+                   read_dpi: int, run) -> tuple[list[Path], list[str]]:
+    """While a read made nothing because sheets crashed, draw those pages
+    CRASH_SHRINK smaller and read the book again. (scores, notes)."""
+    notes: list[str] = []
+    page_dpi: dict[int, int] = {}
+    for _ in range(CRASH_RETRIES):
+        crashed = crashed_sheets(log)
+        if made or not crashed:
+            break
+        now = pages.rendered_dpis(pdf, read_dpi, page_dpi=page_dpi)
+        for sheet in crashed:
+            if sheet in now:
+                page_dpi[sheet] = round(now[sheet] * CRASH_SHRINK)
+        notes.append("Audiveris crashed on page(s) " + ", ".join(map(str, crashed)) + "; reading again with "
+                     + ", ".join(f"page {n} at {d} DPI" for n, d in sorted(page_dpi.items())))
+        render = out / "work" / f"{name}-retry.pdf"
+        pages.rerender(pdf, render, read_dpi, page_dpi=page_dpi)
+        made = _read_render(render, out, log, name, run)
+    if not made and crashed_sheets(log):
+        notes.append("Audiveris still crashes on page(s) "
+                     + ", ".join(map(str, crashed_sheets(log))) + f": read {log}")
+    return made, notes
 
 
 def _patched(table: dict) -> set[tuple[str, str]]:

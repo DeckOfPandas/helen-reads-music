@@ -70,20 +70,33 @@ def capped_dpi(width_pt: float, height_pt: float, dpi: int, max_pixels: int) -> 
     return int((max_pixels / (width_in * height_in)) ** 0.5)
 
 
+def rendered_dpis(pdf: Path, dpi: int, max_pixels: int = AUDIVERIS_MAX_PIXELS,
+                  page_dpi: dict[int, int] | None = None) -> dict[int, int]:
+    """{page number: the DPI rerender gives it}, after `page_dpi` and the cap."""
+    import pymupdf
+    with pymupdf.open(pdf) as doc:
+        return {number: capped_dpi(page.rect.width, page.rect.height,
+                                   (page_dpi or {}).get(number, dpi), max_pixels)
+                for number, page in enumerate(doc, start=1)}
+
+
 def rerender(pdf: Path, out: Path, dpi: int = 450,
-             max_pixels: int = AUDIVERIS_MAX_PIXELS) -> list[str]:
-    """Re-render every page; returns one line per page saying what it did."""
+             max_pixels: int = AUDIVERIS_MAX_PIXELS,
+             page_dpi: dict[int, int] | None = None) -> list[str]:
+    """Re-render every page, at `page_dpi[n]` where given, else `dpi`;
+    returns one line per page saying what it did."""
     import pymupdf
     from PIL import Image
     notes, pages = [], []
     with pymupdf.open(pdf) as doc:
         for number, page in enumerate(doc, start=1):
-            use = capped_dpi(page.rect.width, page.rect.height, dpi, max_pixels)
+            want = (page_dpi or {}).get(number, dpi)
+            use = capped_dpi(page.rect.width, page.rect.height, want, max_pixels)
             zoom = use / 72.0
             pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
             image = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
             pages.append(image)
-            capped = f" (capped from {dpi} to stay under {max_pixels / 1e6:.0f} MP)" if use < dpi else ""
+            capped = f" (capped from {want} to stay under {max_pixels / 1e6:.0f} MP)" if use < want else ""
             notes.append(f"page {number}: {pix.width}x{pix.height} at {use} DPI{capped}")
     if not pages:
         raise ValueError(f"{pdf} has no pages")
