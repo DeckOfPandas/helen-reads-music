@@ -53,8 +53,19 @@ def test_a_whole_bar_rest_takes_the_bar_length():
     report = repair.repair(root, {"time": "4/4"})
     assert root.find("part/measure/note/duration").text == "16"
     assert report[-1] == ("whole-bar rests: 1 set to a full bar, 0 added to empty staves, "
+                          "0 written into bars with nothing in them, "
                           "0 fitted to the bar beside notes in another voice")
     assert score.bad_bars(root.find("part")) == []
+
+
+def test_a_bar_with_nothing_in_it_gets_a_rest_on_each_stave():
+    piano = part("P1", [bar(four_crotchets(), 1, untimed(staves=2)), '<measure number="2"/>'])
+    root = build([("P1", "Piano", piano)])
+    report = repair.repair(root, {"time": "4/4"})
+    empty = root.find("part").findall("measure")[1]
+    assert [(n.findtext("staff"), n.findtext("duration"), n.find("rest").get("measure"))
+            for n in empty.findall("note")] == [("1", "16", "yes"), ("2", "16", "yes")]
+    assert "1 written into bars with nothing in them" in report[-1]
 
 
 def test_an_empty_lower_staff_gets_its_rest():
@@ -67,6 +78,7 @@ def test_an_empty_lower_staff_gets_its_rest():
     assert lower.find("rest").get("measure") == "yes" and lower.findtext("voice") == "5"
     assert lower.find("rest/display-step") is None
     assert report[-1] == ("whole-bar rests: 0 set to a full bar, 1 added to empty staves, "
+                          "0 written into bars with nothing in them, "
                           "0 fitted to the bar beside notes in another voice")
     assert score.bad_bars(root.find("part")) == []
 
@@ -459,6 +471,27 @@ def test_three_parts_combine_onto_one_stave_in_two_steps():
     voices = [sorted({n.findtext("voice") for n in m.findall("note")}) for m in bars]
     assert voices == [["1"], ["1", "2"], ["1", "2", "3"]]
     assert sum(score.count_notes(m) for m in bars) == 4 + 8 + 12
+    assert score.bad_bars(root.find("part")) == []
+
+
+def test_combine_refuses_a_name_two_parts_share():
+    root = build([("P1", "Voice", part("P1", [bar(four_crotchets(), 1, attributes())])),
+                  ("P2", "Voice", part("P2", [bar(four_crotchets(), 1, attributes())])),
+                  ("P3", "Voice 3", part("P3", [bar(four_crotchets(), 1, attributes())]))])
+    with pytest.raises(ValueError, match=r"2 parts are named 'Voice' \(P1, P2\)"):
+        repair.combine_parts(root, {"parts": ["Voice", "Voice 3"]})
+
+
+def test_parts_in_incompatible_divisions_still_combine():
+    from fractions import Fraction
+    triplets = [("C5", Fraction(1, 3))] * 3 + [("C5", 1)] * 3            # needs divisions of 3
+    one = [bar(triplets, 1, attributes(divisions=3), divisions=3)]
+    two = [bar([("E4", Fraction(1, 2))] * 2 + [("E4", 1)] * 3, 1, attributes(divisions=2), divisions=2)]
+    root = build([("P1", "Voice 1", part("P1", one)), ("P2", "Voice 2", part("P2", two))])
+    repair.combine_parts(root, {"parts": ["Voice 1", "Voice 2"], "name": "Voice"})
+    measure = root.find("part/measure")
+    assert measure.findtext("attributes/divisions") == "6"
+    assert sorted(n.findtext("duration") for n in measure.findall("note"))[:5] == ["2", "2", "2", "3", "3"]
     assert score.bad_bars(root.find("part")) == []
 
 

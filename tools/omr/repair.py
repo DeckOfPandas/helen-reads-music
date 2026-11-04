@@ -170,12 +170,32 @@ def _is_rest_only(measure: ET.Element) -> bool:
         n.find("rest") is not None and n.find("rest").get("measure") == "yes" for n in notes)
 
 
-def fill_rest_bars(part: ET.Element) -> tuple[int, int]:
-    """(whole-bar rests set to a full bar, rests added to empty staves)."""
+def _whole_rests(staves: int, ticks: str) -> list[ET.Element]:
+    """A whole-bar rest on each stave, with backups between."""
+    out = []
+    for staff in range(1, staves + 1):
+        if out:
+            backup = ET.Element("backup")
+            ET.SubElement(backup, "duration").text = ticks
+            out.append(backup)
+        note = ET.Element("note")
+        ET.SubElement(note, "rest", {"measure": "yes"})
+        ET.SubElement(note, "duration").text = ticks
+        ET.SubElement(note, "voice").text = str(1 + 4 * (staff - 1))
+        if staves > 1:
+            ET.SubElement(note, "staff").text = str(staff)
+        out.append(note)
+    return out
+
+
+def fill_rest_bars(part: ET.Element) -> tuple[int, int, int]:
+    """(whole-bar rests set to a full bar, rests added to empty staves, bars
+    with nothing in them given a whole-bar rest). An empty bar is one whose
+    instrument no fragment covered: the page lost its stave."""
     divisions = None
     expected = None
     staves = 1
-    resized = added = 0
+    resized = added = emptied = 0
     for measure in part.findall("measure"):
         for attributes in measure.findall("attributes"):
             if attributes.findtext("divisions"):
@@ -185,12 +205,22 @@ def fill_rest_bars(part: ET.Element) -> tuple[int, int]:
             signature = score._time_signature(attributes)
             if signature is not None:
                 expected = signature
-        if divisions is None or expected is None or not _is_rest_only(measure):
+        if divisions is None or expected is None:
             continue
         ticks = expected * divisions
         if ticks.denominator != 1:
             continue
         ticks = str(ticks.numerator)
+        if measure.find("note") is None:
+            position = len(measure)
+            while position and measure[position - 1].tag == "barline":
+                position -= 1
+            for offset, element in enumerate(_whole_rests(staves, ticks)):
+                measure.insert(position + offset, element)
+            emptied += 1
+            continue
+        if not _is_rest_only(measure):
+            continue
         rests = {n.findtext("staff") or "1": n for n in measure.findall("note")}
         for element in list(measure):
             if element.tag in ("note", "backup", "forward"):
@@ -227,7 +257,7 @@ def fill_rest_bars(part: ET.Element) -> tuple[int, int]:
             new.append(note)
         for offset, element in enumerate(new):
             measure.insert(position + offset, element)
-    return resized, added
+    return resized, added, emptied
 
 
 def fix_octave_clefs(part: ET.Element) -> tuple[int, int]:
@@ -926,6 +956,29 @@ def _copy_stream(stream: list[ET.Element], voice: str, staff: int | None, staves
     return out
 
 
+def unify_divisions(parts: list[ET.Element]) -> int:
+    """Rewrite `parts` to count time in one divisions value, the least common
+    multiple of every one they use, scaling every duration to it. Returns it."""
+    import math
+    values = {int(Fraction(d.text)) for p in parts for d in p.iter("divisions") if d.text}
+    target = math.lcm(*values) if values else 1
+    for part in parts:
+        current = Fraction(target)
+        for measure in part.findall("measure"):
+            for element in measure:
+                if element.tag == "attributes":
+                    divisions = element.find("divisions")
+                    if divisions is not None and divisions.text:
+                        current = Fraction(divisions.text)
+                        divisions.text = str(target)
+                    continue
+                duration = element.find("duration")
+                if duration is not None and duration.text:
+                    value = Fraction(duration.text) * target / current
+                    duration.text = str(int(value)) if value.denominator == 1 else str(float(value))
+    return target
+
+
 def combine_parts(root: ET.Element, spec: dict) -> list[str]:
     """Put two parts on one part's staves: {"parts": [A, B], "name": ...,
     "abbreviation": ..., "labels": {"same": "unis.", "divided": "div.",
@@ -940,8 +993,13 @@ def combine_parts(root: ET.Element, spec: dict) -> list[str]:
     for name in (first, second):
         if name not in names:
             raise ValueError(f"combine names no part {name!r}")
+        sharing = [pid for pid, other in score.part_names(root) if other == name]
+        if len(sharing) > 1:
+            raise ValueError(f"combine: {len(sharing)} parts are named {name!r} ({', '.join(sharing)}): "
+                             "place or drop the stray one in merge.json")
     parts = {p.get("id"): p for p in root.findall("part")}
     a, b = parts[names[first]], parts[names[second]]
+    unify_divisions([a, b])          # else a duration may not copy across exactly
     a_states, b_states = merge.attribute_states(a), merge.attribute_states(b)
     b_bars = {m.get("number"): (m, s) for m, s in zip(b.findall("measure"), b_states)}
     labels = spec.get("labels") or {}
@@ -953,6 +1011,8 @@ def combine_parts(root: ET.Element, spec: dict) -> list[str]:
             continue
         b_measure, b_state = b_bars[number]
         a_div, b_div = _divisions(measure, a_state), _divisions(b_measure, b_state)
+        # A bar with no divisions in force holds nothing to scale: use the other's.
+        a_div, b_div = a_div or b_div or Fraction(1), b_div or a_div or Fraction(1)
         staves = int(measure.findtext("attributes/staves") or (a_state[("staves", "1")].text
                      if ("staves", "1") in a_state else 1))
         streams: list[list[ET.Element]] = []          # each starts at the bar's start
@@ -1572,13 +1632,15 @@ def repair(root: ET.Element, config: dict) -> list[str]:
         expected = score.parse_time(time) if time else None
         report += fill_drum_grooves(root, config["drum_grooves"], expected)
 
-    resized = added = 0
+    resized = added = emptied = 0
     for part in parts.values():
-        r, a = fill_rest_bars(part)
+        r, a, e = fill_rest_bars(part)
         resized += r
         added += a
+        emptied += e
     fitted = sum(fit_rest_voices(part) for part in parts.values())
     report.append(f"whole-bar rests: {resized} set to a full bar, {added} added to empty staves, "
+                  f"{emptied} written into bars with nothing in them, "
                   f"{fitted} fitted to the bar beside notes in another voice")
     return report
 

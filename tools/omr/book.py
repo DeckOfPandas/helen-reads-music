@@ -351,6 +351,14 @@ def join_scores(paths: list[Path], out: Path) -> None:
             after = [score.ET.Element("measure", {"number": n}) for j in range(k + 1, len(roots))
                      for n in numbers[j]]
             if before and measures:
+                # The padding carries the part's first attributes, so the
+                # part has divisions, clef and key from bar 1.
+                first = measures[0].find("attributes")
+                if first is not None:
+                    carried = copy.deepcopy(first)
+                    for details in carried.findall("staff-details"):
+                        carried.remove(details)
+                    before[0].append(carried)
                 _show(before[0], False)
                 _show(measures[0], True)
             if after:

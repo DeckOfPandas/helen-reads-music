@@ -77,6 +77,8 @@ def test_pages_are_read_in_chunks_and_joined(tmp_path):
     for part in root.findall("part"):
         assert [m.get("number") for m in part.findall("measure")] == ["1", "2", "3", "4", "5"]
     assert sum(score.count_part_notes(p) for p in root.findall("part")) == 5 * 4
+    later = root.findall("part")[1].find("measure")              # padding, before its chunk
+    assert later.findtext("attributes/divisions") == "4" and later.find("note") is None
     # Each chunk's part is printed only over its own pages, as Audiveris marks a fragment.
     assert [sorted(f.bars, key=int) for f in draft.fragments(root)] == [["1", "2"], ["3", "4"], ["5"]]
     assert "pages 3-4 read at as drawn" in (tmp_path / "read" / "progress.txt").read_text()
