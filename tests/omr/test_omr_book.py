@@ -132,6 +132,41 @@ def test_a_refused_resolution_stops_the_read_for_the_caller(tmp_path):
     assert read.mxl is None and read.refused_dpi == 600
 
 
+class WrongBars(FakeReader):
+    """Reads each page with `bars[(page, dpi)]` bars (default 1): the DPI is
+    the at-<dpi> folder the page is read in."""
+
+    def __init__(self, bars):
+        super().__init__()
+        self.bars = bars
+
+    def __call__(self, args, log=None):
+        out, pdf = Path(args[args.index("-output") + 1]), Path(args[-1])
+        page = int(re.findall(r"\d+", pdf.stem)[0])
+        dpi = out.name.removeprefix("at-")
+        self.calls.append((page, dpi))
+        count = self.bars.get((page, dpi), 1)
+        bars = [bar(four_crotchets(), n, attributes() if n == 1 else "") for n in range(1, count + 1)]
+        write_mxl(out / f"{pdf.stem}.mxl", make_score([("P1", "Fl.", part("P1", bars))]))
+        return 0
+
+
+def test_a_page_with_the_wrong_bars_is_read_at_other_dpis(tmp_path):
+    pdf = a_pdf(tmp_path, 3)
+    reader = WrongBars({(1, "462"): 2, (2, "462"): 3, (2, "330"): 2, (2, "360"): 1,
+                        (3, "462"): 5, (3, "330"): 3, (3, "360"): 4, (3, "400"): 6, (3, "300"): 7})
+    read = book.read_book(pdf, tmp_path / "read", "piece", 462, run=reader, printed={1: 2, 2: 1, 3: 2})
+    assert reader.calls == [(1, "462"), (2, "462"), (2, "330"), (2, "360"),
+                            (3, "462"), (3, "330"), (3, "360"), (3, "400"), (3, "300")]
+    assert len(score.load(read.mxl).find("part").findall("measure")) == 2 + 1 + 3
+    progress = (tmp_path / "read" / "progress.txt").read_text()
+    assert "page 2: 1 bars at 360 DPI, printed 1, matches" in progress
+    assert "page 3: 3 bars at 330 DPI, printed 2, CLOSEST, does NOT match" in progress
+    again = WrongBars({})
+    book.read_book(pdf, tmp_path / "read", "piece", 462, run=again, printed={1: 2, 2: 1, 3: 2})
+    assert again.calls == []                       # every page was finished
+
+
 def test_crashed_sheets_and_fix_dpi():
     log = ("WARN  [x-fixed#39]                      Book 2044 | Error processing stub java.lang.Runtime\n"
            "INFO  [x-fixed#40]                KeyBuilder 1380 | Staff#9 key replication failed.\n")

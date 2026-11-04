@@ -44,6 +44,11 @@ import pages
 import score
 
 CHUNK_PAGES = 5
+# DPIs to try on a page whose bars don't match the printed count, in order.
+# On a dense scan Audiveris splits one system into several, or misses bar
+# lines, at one scale and not another; lower ones often read the layout
+# right where the sharpest read does not.
+PAGE_LADDER = (330, 360, 400, 300)
 # Crashes depend on a page's geometry in pixels; 7% smaller is a different
 # page to Audiveris and still close to the resolution asked for.
 CRASH_SHRINK = 0.93
@@ -195,17 +200,57 @@ def read_pages(pdf: Path, numbers: list[int], folder: Path, dpi: int | None, run
     return result
 
 
+def bar_count(mxls: list[Path]) -> int:
+    return sum(len(score.load(m).find("part").findall("measure")) for m in mxls)
+
+
+def read_page_checked(pdf: Path, page: int, folder: Path, dpi: int | None, run, top: Path,
+                      want: int) -> Result:
+    """Read one page at `dpi`, then at each of PAGE_LADDER until Audiveris
+    finds the `want` bars printed on it; keep the first that does, else the
+    closest. Each try is its own folder (at-<dpi>), so it resumes."""
+    if (folder / DONE).is_file():
+        return _load_done(folder)
+    tries = []
+    for each in [dpi] + [d for d in PAGE_LADDER if d != dpi]:
+        read = read_pages(pdf, [page], folder / f"at-{each or 'drawn'}", each, run, top)
+        if read.refused_dpi or not read.mxls:
+            continue
+        got = bar_count(read.mxls)
+        tries.append((abs(got - want), each, got, read))
+        if got == want:
+            break
+    if not tries:
+        result = Result([], [page], [])
+        _progress(top, f"page {page} LOST: no DPI gave a score")
+    else:
+        miss, each, got, result = min(tries, key=lambda t: t[0])
+        tried = ", ".join(f"{d or 'drawn'}: {g}" for _, d, g, _ in tries)
+        verdict = "matches" if not miss else "CLOSEST, does NOT match"
+        _progress(top, f"page {page}: {got} bars at {each or 'as drawn'} DPI, printed {want}, "
+                       f"{verdict} (tried {tried})")
+    _save_done(folder, result)
+    return result
+
+
 def read_book(pdf: Path, folder: Path, name: str, dpi: int | None = None,
-              run=audiveris.run, chunk_pages: int = CHUNK_PAGES) -> Book:
+              run=audiveris.run, chunk_pages: int = CHUNK_PAGES,
+              printed: dict[int, int] | None = None) -> Book:
     """Read all of `pdf` in chunks into `folder`, then join them into
-    `folder`/<name>.mxl. Raises Interrupted if Audiveris is killed."""
+    `folder`/<name>.mxl. With `printed` ({page: bars printed on it}), each
+    page is read alone and checked (read_page_checked). Raises Interrupted
+    if Audiveris is killed."""
     import pymupdf
     folder.mkdir(parents=True, exist_ok=True)
     with pymupdf.open(pdf) as doc:
         count = len(doc)
     results = []
-    for first in range(1, count + 1, chunk_pages):
-        numbers = list(range(first, min(first + chunk_pages - 1, count) + 1))
+    for first in range(1, count + 1, 1 if printed else chunk_pages):
+        if printed and first in printed:
+            result = read_page_checked(pdf, first, folder / f"p{first:03d}", dpi, run, folder, printed[first])
+            results.append(result)
+            continue
+        numbers = list(range(first, min(first + (1 if printed else chunk_pages) - 1, count) + 1))
         result = read_pages(pdf, numbers, folder / f"p{numbers[0]:03d}-{numbers[-1]:03d}", dpi, run, folder)
         if result.refused_dpi:
             return Book(None, [], [], refused_dpi=result.refused_dpi, log=result.logs[0])

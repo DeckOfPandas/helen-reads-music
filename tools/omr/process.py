@@ -62,6 +62,11 @@ value of N pixels") or too large ("Too large image"), the PDF is
 re-rendered at a DPI that fixes it (pages.py rerender) and read once more.
 A page Audiveris crashes on is drawn smaller and read again (book.py).
 
+With library/<piece>/printed-bars.json ({"<page>": [first bar, last bar]},
+read off the printed bar numbers), each page is read on its own and its bars
+counted: a page Audiveris reads with the wrong number of bars (a system split
+in several, a bar line missed) is read again at other DPIs until one matches.
+
 A piece whose <piece>.mxl exists is not read again unless --force; a new or
 changed merge.json is still applied.
 """
@@ -137,6 +142,19 @@ def interline(log: Path) -> int | None:
     return min(found) if found else None
 
 
+PRINTED_BARS = "printed-bars.json"
+
+
+def printed_bars(piece: Path) -> dict[int, int] | None:
+    """{page: bars printed on it} from library/<piece>/printed-bars.json,
+    {"<page>": [first bar, last bar], ...}; keys starting "_" are notes."""
+    path = piece / PRINTED_BARS
+    if not path.is_file():
+        return None
+    table = json.loads(path.read_text(encoding="utf-8"))
+    return {int(page): span[1] - span[0] + 1 for page, span in table.items() if not page.startswith("_")}
+
+
 def first_read(pdf: Path, out: Path, name: str, run) -> tuple[book.Book, int, list[str]]:
     """The 300 DPI read, in chunks (book.py); at the DPI that fixes it if
     Audiveris refuses the resolution. (book, DPI read at, notes)."""
@@ -144,6 +162,11 @@ def first_read(pdf: Path, out: Path, name: str, run) -> tuple[book.Book, int, li
     # A run that was stopped after Audiveris refused the resolution goes
     # straight back to the DPI it settled on.
     settled = sorted(chunks.glob("first-*dpi"))
+    printed = printed_bars(out.parent)
+    if printed:
+        dpi = int(settled[-1].name.removeprefix("first-").removesuffix("dpi")) if settled else None
+        read = book.read_book(pdf, chunks / f"by-page-{dpi or 'drawn'}", name, dpi, run, printed=printed)
+        return read, dpi or book.AS_DRAWN_DPI, read.notes
     if settled:
         dpi = int(settled[-1].name.removeprefix("first-").removesuffix("dpi"))
     else:
@@ -227,7 +250,9 @@ def process(piece: Path, force: bool = False, run=None,
             return False, notes + [f"Audiveris made no MusicXML: read {log}"]
         shutil.copy(read.mxl, mxl)
         measured = interline(log)
-        if sharp and measured:
+        if sharp and printed_bars(piece):
+            notes.append("each page read at the DPI that found its printed bars; no sharper read")
+        elif sharp and measured:
             _, sharp_notes = sharp_read(pdf, out, measured, read_dpi, name, read.lost, run)
             notes.extend(sharp_notes)
         elif sharp:

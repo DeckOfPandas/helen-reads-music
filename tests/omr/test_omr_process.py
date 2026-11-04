@@ -117,6 +117,18 @@ def test_a_stopped_read_goes_straight_back_to_the_dpi_it_settled_on(tmp_path):
     assert [read_of(c) for c in again.calls] == ["first-600dpi"]
 
 
+def test_printed_bars_read_each_page_alone_and_checked(tmp_path):
+    piece = piece_with_pdfs(tmp_path)
+    (piece / "printed-bars.json").write_text(json.dumps({"_about": "x", "1": [1, 2], "2": [3, 4]}))
+    fake = FakeAudiveris()
+    ok, notes = process.process(piece, run=fake)
+    assert ok, notes
+    assert [read_of(c) for c in fake.calls] == ["by-page-drawn", "by-page-drawn"]
+    assert "each page read at the DPI that found its printed bars; no sharper read" in notes
+    progress = (piece / "omr" / "chunks" / "by-page-drawn" / "progress.txt").read_text()
+    assert "page 2: 2 bars at as drawn DPI, printed 2, matches" in progress
+
+
 def test_an_interrupted_read_carries_on_without_force(tmp_path, capsys):
     piece = piece_with_pdfs(tmp_path, count=1)
     killed = FakeAudiveris(kill_on=1)
