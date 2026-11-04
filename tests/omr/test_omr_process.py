@@ -106,6 +106,17 @@ def test_a_low_interline_is_re_rendered_and_read_again(tmp_path):
     assert (piece / "omr" / "under-the-sea.mxl").is_file()
 
 
+def test_a_stopped_read_goes_straight_back_to_the_dpi_it_settled_on(tmp_path):
+    piece = piece_with_pdfs(tmp_path, count=1)
+    refused = "Sheet#1 too low interline value of 10 pixels"
+    with pytest.raises(process.book.Interrupted):
+        process.process(piece, run=FakeAudiveris(fail_with=[refused], kill_on=2))
+    again = FakeAudiveris()
+    ok, notes = process.process(piece, run=again)
+    assert ok, notes
+    assert [read_of(c) for c in again.calls] == ["first-600dpi"]
+
+
 def test_an_interrupted_read_carries_on_without_force(tmp_path, capsys):
     piece = piece_with_pdfs(tmp_path, count=1)
     killed = FakeAudiveris(kill_on=1)

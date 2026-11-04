@@ -73,7 +73,7 @@ page (about 20 for a 23-page score). It writes everything to
 not run again unless you pass `--force`. Later runs only redo the merge and
 checks, which is far quicker.
 
-Audiveris reads ten pages at a time (`book.py`), and every finished chunk
+Audiveris reads five pages at a time (`book.py`), and every finished chunk
 is kept. For any read longer than a few minutes, don't run `process.py`
 directly; start the runner in its own session:
 

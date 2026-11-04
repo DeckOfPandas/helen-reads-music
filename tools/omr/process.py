@@ -21,7 +21,7 @@ merge.json are about it. After the merge, its bars that do not add up are
 taken from the 300 DPI read where that one's add up (combine.py).
 --single skips the sharper read.
 
-Audiveris reads the pages ten at a time (book.py), so a page it fails on
+Audiveris reads the pages five at a time (book.py), so a page it fails on
 costs at most that page, and an interrupted run loses nothing finished: run
 it again without --force and it carries on from the chunks in chunks/. When
 Audiveris is killed from outside (memory, the container stopping), the exit
@@ -140,10 +140,16 @@ def first_read(pdf: Path, out: Path, name: str, run) -> tuple[book.Book, int, li
     """The 300 DPI read, in chunks (book.py); at the DPI that fixes it if
     Audiveris refuses the resolution. (book, DPI read at, notes)."""
     chunks = out / CHUNKS
-    read = book.read_book(pdf, chunks / "first", name, None, run)
-    if not read.refused_dpi:
-        return read, book.AS_DRAWN_DPI, read.notes
-    dpi = read.refused_dpi
+    # A run that was stopped after Audiveris refused the resolution goes
+    # straight back to the DPI it settled on.
+    settled = sorted(chunks.glob("first-*dpi"))
+    if settled:
+        dpi = int(settled[-1].name.removeprefix("first-").removesuffix("dpi"))
+    else:
+        read = book.read_book(pdf, chunks / "first", name, None, run)
+        if not read.refused_dpi:
+            return read, book.AS_DRAWN_DPI, read.notes
+        dpi = read.refused_dpi
     notes = [f"Audiveris refused the resolution; reading at up to {dpi} DPI"]
     read = book.read_book(pdf, chunks / f"first-{dpi}dpi", name, dpi, run)
     return read, dpi, notes + read.notes

@@ -28,7 +28,7 @@ one's does (`combine.py`, which matches that read's parts itself).
 ## Reading in chunks
 
 One page Audiveris crashes on stops it exporting the whole book, and a
-whole book is held in memory. So `book.py` reads ten pages at a time, each
+whole book is held in memory. So `book.py` reads five pages at a time, each
 chunk its own book, and joins the chunks into one score shaped as a single
 read would be. A page that crashes is drawn 7% smaller and read again. A
 chunk that still fails is halved until only the bad page is left, and that

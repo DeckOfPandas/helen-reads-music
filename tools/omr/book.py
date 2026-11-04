@@ -23,7 +23,7 @@ that chunk: the next run reads it again. progress.txt in the folder logs
 each chunk as it finishes, with the time.
 
 Folder layout, under the `folder` given:
-  p001-010/            one chunk: source.pdf (its pages), the PDF read,
+  p001-005/            one chunk: source.pdf (its pages), the PDF read,
                        audiveris.log, the .mxl, done.json; a/ and b/ if split
   audiveris.log        every chunk's log, in page order
   <name>.mxl           the joined score
@@ -43,7 +43,9 @@ import audiveris
 import pages
 import score
 
-CHUNK_PAGES = 10
+# Past about 5 pages of 20 MP, Audiveris swaps sheets out to its .omr book
+# and fails to load them back (FileSystemAlreadyExistsException).
+CHUNK_PAGES = 5
 # Crashes depend on a page's geometry in pixels; 7% smaller is a different
 # page to Audiveris and still close to the resolution asked for.
 CRASH_SHRINK = 0.93
