@@ -75,11 +75,18 @@ Always, when "time" is known (from the score or merge.json):
       (positions like F4, xG5 for an x notehead, oxG5 for one with the open
       mark of an open hi-hat, sB4 for a rhythm slash, ~F4 tied from the note
       before, joined by + for notes struck together; r for a rest; length in
-      crotchets, then > for an accent, ^ a marcato, ~ to tie on). It goes into the
+      crotchets, 1/3 or 2/3 for triplets, g for a grace note; then > for an
+      accent, ^ a marcato, ~ to tie on, z a roll). "up2" is a second hands
+      voice, for a page that writes one above the first. It goes into the
       bars it lists ("bars": [9, 10]), or else into every bar whose solid
       notes (kick, snare) come in the same order as the groove's. The report
       lists the bars each groove filled. Variations it cannot see (an open
-      hi-hat, a crash) are not detected.
+      hi-hat, a crash) are not detected. The part's divisions are rescaled
+      to fit the grooves, and its clefs are made percussion clefs.
+      "marks": {"9": ["0 mf", "0 Lite time on Hat", "2 Fill"]} beside
+      "grooves" writes dynamics and words into bars, at crotchets into the
+      bar; with it, the marks Audiveris read are dropped from every bar a
+      groove writes, since they belong to the notes it replaced.
 
   "borrow_rests": false
       Turns off borrow_rests, which process.py otherwise runs last: a short
@@ -578,25 +585,34 @@ class DrumEvent:
     strong: bool = False         # ^ (marcato)
     tie_start: bool = False      # tied on to the next
     hidden: bool = False         # an invisible rest, padding a voice the page leaves short
+    grace: bool = False          # a grace note (a flam's or drag's): no length of its own
+    roll: bool = False           # three strokes through the stem
 
 
 def parse_groove_voice(text: str) -> list[DrumEvent]:
     """"xG5:1 ~oxG5+C5:1/2>~ r:1" -> drum events. Before a position: x an x
     notehead, o the open mark, s a rhythm slash, ~ tied from the note
-    before. After the length: > an accent, ^ a marcato, ~ tied on. r is a
-    rest."""
+    before. After the length: > an accent, ^ a marcato, ~ tied on, z a
+    roll. r is a rest. A length of g is a grace note before the next note;
+    one with a 3 under it (1/3, 2/3, 1/6) is a triplet."""
     events = []
     for token in text.split():
         heads_text, _, length = token.rpartition(":")
         if not heads_text or not length:
             raise ValueError(f"drum groove token {token!r} is not <positions>:<length>")
         marks = ""
-        while length and length[-1] in ">^~":
+        while length and length[-1] in ">^~z":
             marks, length = marks + length[-1], length[:-1]
+        grace = length == "g"
         try:
-            event = DrumEvent([], Fraction(length), ">" in marks, "^" in marks, "~" in marks)
+            event = DrumEvent([], Fraction(0) if grace else Fraction(length), ">" in marks, "^" in marks,
+                              "~" in marks, grace=grace, roll="z" in marks)
+            if not grace and event.length <= 0:
+                raise ValueError
         except (ValueError, ZeroDivisionError):
             raise ValueError(f"drum groove token {token!r} has no length") from None
+        if grace and heads_text == "r":
+            raise ValueError(f"drum groove token {token!r}: a grace note cannot be a rest")
         if heads_text != "r":
             for head in heads_text.split("+"):
                 flags = ""
@@ -647,18 +663,47 @@ def _groove_solid_sequence(voices: list[list[DrumEvent]]) -> list[str]:
     return [position for _, position in sorted(hits)]
 
 
+def _tuplet_ends(events: list[DrumEvent]) -> dict[int, str]:
+    """Where each triplet bracket starts and stops, by event index. A bracket
+    runs from a triplet length until the lengths since it add up to a plain
+    value again (three triplet quavers, or a triplet crotchet and quaver)."""
+    ends: dict[int, str] = {}
+    start, total = None, Fraction(0)
+    for index, event in enumerate(events):
+        if event.grace:
+            continue
+        if start is None:
+            if event.length.denominator % 3:
+                continue
+            start, total = index, Fraction(0)
+        total += event.length
+        if total.denominator % 3:
+            ends[start], ends[index] = "start", "stop"
+            start = None
+    if start is not None:
+        raise ValueError(f"drum groove triplet from event {start + 1} never completes a beat")
+    return ends
+
+
 def _drum_notes(events: list[DrumEvent], voice: str, stem: str, divisions: Fraction) -> list[ET.Element]:
     notes = []
-    for event in events:
+    tuplets = _tuplet_ends(events)
+    for position, event in enumerate(events):
         ticks = event.length * divisions
         if ticks.denominator != 1:
             raise ValueError(f"drum groove length {event.length} does not fit divisions {divisions}")
-        try:
-            kind, dots, _ = _length_spelling(event.length)
-        except ValueError:
-            kind, dots = None, 0                             # padding of an odd length: no type
+        triplet = False
+        if event.grace:
+            kind, dots = "eighth", 0
+        else:
+            try:
+                kind, dots, triplet = _length_spelling(event.length)
+            except ValueError:
+                kind, dots = None, 0                         # padding of an odd length: no type
         for index, head in enumerate(event.heads or [None]):
             note = ET.Element("note", {"print-object": "no"} if event.hidden and head is None else {})
+            if event.grace:
+                ET.SubElement(note, "grace", {"slash": "yes"})
             if index:
                 ET.SubElement(note, "chord")
             if head is None:
@@ -667,7 +712,8 @@ def _drum_notes(events: list[DrumEvent], voice: str, stem: str, divisions: Fract
                 unpitched = ET.SubElement(note, "unpitched")
                 ET.SubElement(unpitched, "display-step").text = head.step
                 ET.SubElement(unpitched, "display-octave").text = str(head.octave)
-            ET.SubElement(note, "duration").text = str(ticks.numerator)
+            if not event.grace:
+                ET.SubElement(note, "duration").text = str(ticks.numerator)
             ties = [] if head is None else (["stop"] if head.tie_stop else []) + (["start"] if event.tie_start else [])
             for kind_of_tie in ties:
                 ET.SubElement(note, "tie", {"type": kind_of_tie})
@@ -676,39 +722,55 @@ def _drum_notes(events: list[DrumEvent], voice: str, stem: str, divisions: Fract
                 ET.SubElement(note, "type").text = kind
             for _ in range(dots):
                 ET.SubElement(note, "dot")
+            if triplet:
+                modification = ET.SubElement(note, "time-modification")
+                ET.SubElement(modification, "actual-notes").text = "3"
+                ET.SubElement(modification, "normal-notes").text = "2"
+            notations = ET.Element("notations")
+            if index == 0 and position in tuplets:
+                ET.SubElement(notations, "tuplet", {"type": tuplets[position], "bracket": "yes"})
             if head is not None:
                 ET.SubElement(note, "stem").text = stem
                 if head.cross or head.slash:
                     ET.SubElement(note, "notehead").text = "slash" if head.slash else "x"
-                notations = ET.Element("notations")
                 for kind_of_tie in ties:
                     ET.SubElement(notations, "tied", {"type": kind_of_tie})
                 if head.open:
                     ET.SubElement(ET.SubElement(notations, "technical"), "open")
+                if index == 0 and event.roll:
+                    ET.SubElement(ET.SubElement(notations, "ornaments"), "tremolo", {"type": "single"}).text = "3"
                 if index == 0 and (event.accent or event.strong):
                     articulations = ET.SubElement(notations, "articulations")
                     if event.accent:
                         ET.SubElement(articulations, "accent")
                     if event.strong:
                         ET.SubElement(articulations, "strong-accent", {"type": "up" if stem == "up" else "down"})
-                if len(notations):
-                    note.append(notations)
+            if len(notations):
+                note.append(notations)
             notes.append(note)
     return notes
 
 
+DRUM_VOICES = (("up", "1", "up"), ("down", "2", "down"), ("up2", "3", "up"))
+
+
 def _write_drum_voices(measure: ET.Element, up: list[DrumEvent], down: list[DrumEvent],
-                       divisions: Fraction) -> None:
+                       divisions: Fraction, up2: list[DrumEvent] | None = None) -> None:
     """Replace a drum bar's notes: hands in voice 1 (stems up), feet in voice
-    2 (stems down). Either may be empty."""
+    2 (stems down), and a second hands line, where the page has one, in
+    voice 3 (stems up). Any may be empty."""
     for element in [e for e in measure if e.tag in ("note", "backup", "forward")]:
         measure.remove(element)
-    new = _drum_notes(up, "1", "up", divisions)
-    if up and down:
-        back = ET.Element("backup")
-        ET.SubElement(back, "duration").text = str((_span(up) * divisions).numerator)
-        new.append(back)
-    new += _drum_notes(down, "2", "down", divisions)
+    new: list[ET.Element] = []
+    for events, (_, voice, stem) in zip((up, down, up2 or []), DRUM_VOICES):
+        if not events:
+            continue
+        if new:
+            back = ET.Element("backup")
+            ET.SubElement(back, "duration").text = str((previous * divisions).numerator)
+            new.append(back)
+        new += _drum_notes(events, voice, stem, divisions)
+        previous = _span(events)
     position = len(measure)
     while position and measure[position - 1].tag == "barline":
         position -= 1
@@ -737,39 +799,135 @@ def fill_drum_grooves(root: ET.Element, config: dict, expected: Fraction | None)
     part = next(p for p in root.findall("part") if p.get("id") == names[part_name])
     grooves = {}
     for name, spec in (config.get("grooves") or {}).items():
-        up, down = parse_groove_voice(spec.get("up", "")), parse_groove_voice(spec.get("down", ""))
-        for label, events in (("up", up), ("down", down)):
+        voices = [parse_groove_voice(spec.get(key, "")) for key, _, _ in DRUM_VOICES]
+        for (label, _, _), events in zip(DRUM_VOICES, voices):
             total = _span(events)
             if events and expected is not None and total != expected:
                 raise ValueError(f"drum groove {name} {label} lasts {total} crotchets, the bar {expected}")
         bars = {str(b) for b in spec["bars"]} if "bars" in spec else None
-        grooves[name] = (up, down, bars, _groove_solid_sequence([up, down]))
+        grooves[name] = (voices, bars, _groove_solid_sequence(voices))
+    marks = {str(bar): [_parse_mark(text) for text in texts]
+             for bar, texts in (config.get("marks") or {}).items() if not str(bar).startswith("_")}
 
+    _fit_divisions(part, [v for voices, _, _ in grooves.values() for v in voices])
+    _percussion_clefs(part)
     filled: dict[str, list[str]] = {name: [] for name in grooves}
     states = merge.attribute_states(part)
+    by_number = {}
     for measure, state in zip(part.findall("measure"), states):
         number = measure.get("number") or "?"
-        chosen = [n for n, (_, _, bars, _) in grooves.items() if bars is not None and number in bars]
+        by_number[number] = (measure, state)
+        chosen = [n for n, (_, bars, _) in grooves.items() if bars is not None and number in bars]
         if not chosen:
             sequence = _solid_sequence(measure)
-            chosen = [n for n, (_, _, bars, solid) in grooves.items()
+            chosen = [n for n, (_, bars, solid) in grooves.items()
                       if bars is None and sequence and sequence == solid]
         if len(chosen) != 1:
             continue
         divisions = _divisions(measure, state)
         if divisions is None:
             continue
-        up, down, _, _ = grooves[chosen[0]]
+        voices = grooves[chosen[0]][0]
         own = [score._time_signature(a) for a in measure.findall("attributes")]
         own = [t for t in own if t is not None]
         in_force = own[-1] if own else (score._time_signature(_wrap(state[("time", "1")]))
                                         if ("time", "1") in state else expected)
-        if in_force is not None and _span(up or down) != in_force:
+        if in_force is not None and _span(next(v for v in voices if v)) != in_force:
             continue
-        _write_drum_voices(measure, up, down, divisions)
+        _write_drum_voices(measure, *voices[:2], divisions, voices[2])
         filled[chosen[0]].append(number)
-    return [f"{part_name}: groove {name} written into {len(bars)} bar(s): {', '.join(bars) or 'none'}"
-            for name, bars in filled.items()]
+        if marks:
+            for direction in measure.findall("direction"):
+                measure.remove(direction)
+    report = [f"{part_name}: groove {name} written into {len(bars)} bar(s): {', '.join(bars) or 'none'}"
+              for name, bars in filled.items()]
+    for number, bar_marks in marks.items():
+        if number not in by_number:
+            raise ValueError(f"drum_grooves marks: {part_name} has no bar {number}")
+        measure, state = by_number[number]
+        for offset, text in bar_marks:
+            _place_mark(measure, offset, text, _divisions(measure, state))
+    if marks:
+        report.append(f"{part_name}: marks written into {len(marks)} bar(s); the read's own marks "
+                      f"dropped from every bar a groove wrote")
+    return report
+
+
+DYNAMICS = {"ppp", "pp", "p", "mp", "mf", "f", "ff", "fff", "sf", "sfz", "sffz", "fz", "fp", "sfp", "rf", "rfz"}
+
+
+def _parse_mark(text: str) -> tuple[Fraction, str]:
+    """"2 Fill" -> (2, "Fill"): crotchets into the bar, then the words or
+    the dynamic."""
+    offset, _, words = text.strip().partition(" ")
+    try:
+        at = Fraction(offset)
+    except (ValueError, ZeroDivisionError):
+        raise ValueError(f"drum mark {text!r} is not '<crotchets into the bar> <text>'") from None
+    if not words.strip() or at < 0:
+        raise ValueError(f"drum mark {text!r} is not '<crotchets into the bar> <text>'")
+    return at, words.strip()
+
+
+def _place_mark(measure: ET.Element, offset: Fraction, text: str, divisions: Fraction | None) -> None:
+    """A dynamic below the stave, or words above it, at `offset` crotchets:
+    just before the first note that starts there, or with an <offset> from
+    the bar's start when none does."""
+    direction = ET.Element("direction", {"placement": "below" if text in DYNAMICS else "above"})
+    kind = ET.SubElement(direction, "direction-type")
+    if text in DYNAMICS:
+        ET.SubElement(ET.SubElement(kind, "dynamics"), text)
+    else:
+        ET.SubElement(kind, "words").text = text
+    cursor, anchor = Fraction(0), None
+    for element in measure:
+        if element.tag in ("backup", "forward"):
+            length = Fraction(element.findtext("duration") or 0)
+            cursor += -length if element.tag == "backup" else length
+        elif element.tag == "note" and element.find("chord") is None:
+            if anchor is None and divisions and cursor == offset * divisions:
+                anchor = element
+            cursor += Fraction(element.findtext("duration") or 0)
+    if anchor is None:
+        anchor = next((e for e in measure if e.tag in ("note", "backup", "forward")), None)
+        if offset and divisions:
+            ticks = offset * divisions
+            ET.SubElement(direction, "offset").text = str(int(ticks)) if ticks.denominator == 1 else str(float(ticks))
+    measure.insert(list(measure).index(anchor) if anchor is not None else len(measure), direction)
+
+
+def _fit_divisions(part: ET.Element, voices: list[list[DrumEvent]]) -> None:
+    """Rescale `part` so every length in `voices` is a whole number of
+    divisions: a semiquaver needs 4 to the crotchet, a triplet 3."""
+    import math
+    need = math.lcm(1, *(e.length.denominator for events in voices for e in events))
+    have = {int(Fraction(d.text)) for d in part.iter("divisions") if d.text}
+    if any(value % need for value in have):
+        unify_divisions([part], also=need)
+
+
+def _percussion_clefs(part: ET.Element) -> None:
+    """A kit stave has only a percussion clef: Audiveris reads it on a scan
+    as treble or alto now and then, and can leave the first bar with none."""
+    for clef in part.iter("clef"):
+        for child in [c for c in clef if c.tag != "sign"]:      # line, clef-octave-change
+            clef.remove(child)
+        sign = clef.find("sign")
+        if sign is None:
+            sign = ET.SubElement(clef, "sign")
+        sign.text = "percussion"
+    first = part.find("measure")
+    if first is None or first.find("attributes/clef") is not None:
+        return
+    attributes = first.find("attributes")
+    if attributes is None:
+        attributes = ET.Element("attributes")
+        first.insert(next((i for i, e in enumerate(first) if e.tag != "print"), len(first)), attributes)
+    clef = ET.Element("clef")
+    ET.SubElement(clef, "sign").text = "percussion"
+    before = ("divisions", "key", "time", "staves", "part-symbol", "instruments")
+    index = max((i + 1 for i, e in enumerate(attributes) if e.tag in before), default=0)
+    attributes.insert(index, clef)
 
 
 # --- drum voicing ----------------------------------------------------------------
@@ -793,6 +951,18 @@ DRUM_KEY = {
     ("G4", "normal"): (41, "Low Floor Tom"),
 }
 FEET = {36, 44}
+# General MIDI percussion names, for sounds merge.json "drum_key" adds by number.
+GM_DRUMS = {
+    35: "Acoustic Bass Drum", 36: "Bass Drum", 37: "Side Stick", 38: "Snare", 39: "Hand Clap",
+    40: "Electric Snare", 41: "Low Floor Tom", 42: "Closed Hi-Hat", 43: "Floor Tom", 44: "Pedal Hi-Hat",
+    45: "Low Tom", 46: "Open Hi-Hat", 47: "Low-Mid Tom", 48: "Mid Tom", 49: "Crash Cymbal", 50: "High Tom",
+    51: "Ride Cymbal", 52: "Chinese Cymbal", 53: "Ride Bell", 54: "Tambourine", 55: "Splash Cymbal",
+    56: "Cowbell", 57: "Crash Cymbal 2", 58: "Vibraslap", 59: "Ride Cymbal 2", 60: "Hi Bongo",
+    61: "Low Bongo", 62: "Mute Hi Conga", 63: "Open Hi Conga", 64: "Low Conga", 65: "High Timbale",
+    66: "Low Timbale", 67: "High Agogo", 68: "Low Agogo", 69: "Cabasa", 70: "Maracas", 71: "Short Whistle",
+    72: "Long Whistle", 73: "Short Guiro", 74: "Long Guiro", 75: "Claves", 76: "Hi Wood Block",
+    77: "Low Wood Block", 78: "Mute Cuica", 79: "Open Cuica", 80: "Mute Triangle", 81: "Open Triangle",
+}
 
 
 def _drum_key(note: ET.Element) -> tuple:
@@ -817,7 +987,7 @@ def voice_drum_parts(root: ET.Element, extra_key: dict | None = None) -> list[st
             continue
         parts_of_spec = spec.split()
         key[tuple(parts_of_spec) if len(parts_of_spec) > 1 else (parts_of_spec[0], "normal")] = \
-            (int(number), spec)
+            (int(number), GM_DRUMS.get(int(number), spec))
     report = []
     names = dict(score.part_names(root))
     score_parts = {sp.get("id"): sp for sp in root.iter("score-part")}
@@ -956,12 +1126,13 @@ def _copy_stream(stream: list[ET.Element], voice: str, staff: int | None, staves
     return out
 
 
-def unify_divisions(parts: list[ET.Element]) -> int:
+def unify_divisions(parts: list[ET.Element], also: int = 1) -> int:
     """Rewrite `parts` to count time in one divisions value, the least common
-    multiple of every one they use, scaling every duration to it. Returns it."""
+    multiple of every one they use and `also`, scaling every duration to it.
+    Returns it."""
     import math
     values = {int(Fraction(d.text)) for p in parts for d in p.iter("divisions") if d.text}
-    target = math.lcm(*values) if values else 1
+    target = math.lcm(also, *values) if values else also
     for part in parts:
         current = Fraction(target)
         for measure in part.findall("measure"):
@@ -1524,7 +1695,7 @@ def apply_patches(root: ET.Element, patches: dict, assume: Fraction | None = Non
         {"voice": "5", "staff": "2", "edit": "..."}   the same for another voice
         {"notes": "D6:1/2 r:1/2 Bb5:2"}  the voice's notes replaced outright, the
                                     other voices dropped
-        {"up": "...", "down": "..."}  a drum bar replaced, as a drum groove
+        {"up": "...", "down": "...", "up2": "..."}  a drum bar replaced, as a drum groove
     Pitches as Bb4, F#5, Bn4; x before the step for an x notehead; ~ before it
     for a tie from the note before, ~ after the length to tie on; @text after
     for a lyric; A/B:len for a fingered tremolo (chord A alternating with
@@ -1552,10 +1723,13 @@ def apply_patches(root: ET.Element, patches: dict, assume: Fraction | None = Non
             first = measure.find("note")
             voice = patch.get("voice") or (first.findtext("voice") if first is not None else None) or "1"
             staff = patch.get("staff") or (first.findtext("staff") if first is not None else None)
+            drum = any(key in patch for key, _, _ in DRUM_VOICES)
             try:
-                if "up" in patch or "down" in patch:
-                    _write_drum_voices(measure, parse_groove_voice(patch.get("up", "")),
-                                       parse_groove_voice(patch.get("down", "")), divisions)
+                if drum:
+                    voices = [parse_groove_voice(patch.get(key, "")) for key, _, _ in DRUM_VOICES]
+                    _fit_divisions(part, voices)
+                    divisions = _divisions(measure, state)
+                    _write_drum_voices(measure, *voices[:2], divisions, voices[2])
                 elif "notes" in patch:
                     _replace_voice(measure, voice, staff, patch["notes"], divisions,
                                    others=not patch.get("voice"))
@@ -1571,7 +1745,7 @@ def apply_patches(root: ET.Element, patches: dict, assume: Fraction | None = Non
                 expected = score._time_signature(_wrap(state[("time", "1")]))
             expected = expected or assume
             for check_voice in {n.findtext("voice") or "1" for n in measure.findall("note")}:
-                if "up" in patch or "down" in patch or "notes" in patch or check_voice == voice:
+                if drum or "notes" in patch or check_voice == voice:
                     span = _voice_span(measure, check_voice, divisions)
                     if expected is not None and span != expected:
                         raise ValueError(f"patch {part_name} bar {number}: voice {check_voice} "

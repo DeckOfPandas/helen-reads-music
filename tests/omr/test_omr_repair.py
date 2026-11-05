@@ -336,6 +336,86 @@ def test_slash_bars():
     assert [n.findtext("notehead") for n in root.iter("note")] == ["slash"] * 4
 
 
+def test_drum_triplets_carry_their_ratio_and_one_bracket_each():
+    root = build([("P1", "Drum Set", f'<part id="P1">{drum_bar(1, KICK_ONLY, True)}</part>')])
+    # Triplet quavers, then a triplet crotchet and quaver, then a plain minim.
+    repair.apply_patches(root, {"Drum Set": {"1": {"up": "C5:1/3 C5:1/3 r:1/3 D5:2/3 B4:1/3 sB4:2"}}})
+    m = root.find("part/measure")
+    assert m.findtext("attributes/divisions") == "6"            # rescaled from 2 to fit thirds
+    notes = m.findall("note")
+    assert [n.find("time-modification") is not None for n in notes] == [True] * 5 + [False]
+    assert [n.findtext("type") for n in notes] == ["eighth", "eighth", "eighth", "quarter", "eighth", "half"]
+    brackets = [(i, t.get("type")) for i, n in enumerate(notes) for t in n.findall("notations/tuplet")]
+    assert brackets == [(0, "start"), (2, "stop"), (3, "start"), (4, "stop")]
+    assert notes[2].find("rest") is not None                    # a rest can end a bracket
+    assert score.bad_bars(root.find("part")) == []
+
+
+def test_a_flam_and_a_roll():
+    events = repair.parse_groove_voice("C5:g C5:1> F4:2z r:1")
+    assert events[0].grace and events[0].length == 0 and events[1].accent and events[2].roll
+    root = build([("P1", "Drum Set", f'<part id="P1">{drum_bar(1, KICK_ONLY, True)}</part>')])
+    repair.apply_patches(root, {"Drum Set": {"1": {"up": "C5:g C5:1> C5:2z r:1"}}})
+    notes = root.find("part/measure").findall("note")
+    assert notes[0].find("grace").get("slash") == "yes" and notes[0].find("duration") is None
+    assert notes[2].find("notations/ornaments/tremolo").text == "3"
+    assert score.bad_bars(root.find("part")) == []
+
+
+@pytest.mark.parametrize("token", ["C5:0", "r:g", "C5:-1"])
+def test_drum_tokens_with_no_sounding_length_are_refused(token):
+    with pytest.raises(ValueError):
+        repair.parse_groove_voice(token)
+
+
+def test_a_third_drum_voice_above_the_slashes():
+    root = build([("P1", "Drum Set", f'<part id="P1">{drum_bar(1, KICK_ONLY, True)}</part>')])
+    repair.apply_patches(root, {"Drum Set": {"1": {
+        "up": "sB4:2 sB4:2", "down": "F4:1 r:1/2 F4:1/2 F4:1 F4:1", "up2": "r:1 r:1/2 xG5:1/2 r:2"}}})
+    m = root.find("part/measure")
+    assert [e.tag for e in m if e.tag == "backup"] == ["backup", "backup"]
+    by_voice = {}
+    for n in m.findall("note"):
+        by_voice.setdefault(n.findtext("voice"), []).append(n.findtext("stem"))
+    assert set(by_voice) == {"1", "2", "3"} and by_voice["3"] == [None, None, "up", None]
+    assert score.bad_bars(root.find("part")) == []
+
+
+def test_grooves_rescale_divisions_make_clefs_percussion_and_write_marks():
+    misread_clef = ('<measure number="2"><attributes><clef><sign>G</sign><line>2</line></clef></attributes>'
+                    '<direction><direction-type><dynamics><p/></dynamics></direction-type></direction>'
+                    + drum_bar(9, KICK_ONLY)[len('<measure number="9">'):])
+    no_clef = drum_bar(1, KICK_ONLY, True).replace("<clef><sign>percussion</sign></clef>", "")
+    root = build([("P1", "Drums", f'<part id="P1">{no_clef}{misread_clef}{drum_bar(3, KICK_ONLY)}</part>')])
+    report = repair.repair(root, {"drum_grooves": {"part": "Drums", "grooves": {
+        "fill": {"up": "C5:1/4 C5:1/4 C5:1/2 r:3", "bars": [2]}},
+        "marks": {"2": ["0 mf", "0 Fill", "3/2 cresc."]}}})
+    assert "Drums: marks written into 1 bar(s); the read's own marks dropped from every bar a groove wrote" in report
+    part_element = root.find("part")
+    bars = part_element.findall("measure")
+    assert [c.findtext("sign") for c in part_element.iter("clef")] == ["percussion", "percussion"]
+    assert bars[0].find("attributes/clef") is not None and bars[1].find("attributes/clef/line") is None
+    assert {d.text for d in part_element.iter("divisions")} == {"4"}
+    # Bar 3, left as read, is rescaled with the rest: a crotchet is now 4.
+    assert [n.findtext("duration") for n in bars[2].findall("note")] == ["4", "12"]
+    directions = bars[1].findall("direction")
+    assert [(d.get("placement"), d.findtext("direction-type/words"),
+             [c.tag for c in d.iter() if c.tag in repair.DYNAMICS]) for d in directions] == [
+        ("below", None, ["mf"]), ("above", "Fill", []), ("above", "cresc.", [])]
+    # The read's p is gone; "cresc." at 3/2 crotchets, where no note starts, carries an offset.
+    assert directions[2].findtext("offset") == "6"
+    children = list(bars[1])
+    assert all(children.index(d) < children.index(bars[1].find("note")) for d in directions)
+    assert score.bad_bars(part_element) == []
+
+
+def test_bad_drum_marks_are_refused():
+    root = build([("P1", "Drums", f'<part id="P1">{drum_bar(1, KICK_ONLY, True)}</part>')])
+    for marks in ({"1": ["Fill"]}, {"7": ["0 f"]}):
+        with pytest.raises(ValueError):
+            repair.repair(root, {"drum_grooves": {"part": "Drums", "grooves": {}, "marks": marks}})
+
+
 def test_every_drum_note_gets_its_instrument_and_voices_their_stems():
     drums = f'<part id="P1">{drum_bar(1, MISREAD_GROOVE, True)}</part>'
     root = build([("P1", "Drum Set", drums)])
@@ -368,6 +448,8 @@ def test_a_drum_note_outside_the_key_is_named_and_the_key_can_grow():
     assert "NOT IN THE DRUM KEY: {'E4 x': 1}" in repair.voice_drum_parts(root)[0]
     repair.voice_drum_parts(root, {"E4 x": 54})
     assert root.find(".//note/instrument").get("id") == "P1-I54"
+    # Named as General MIDI names the sound, not by where it sits on the stave.
+    assert root.find(".//score-instrument/instrument-name").text == "Tambourine"
 
 
 def _with_lyric(text, chord_member=False):

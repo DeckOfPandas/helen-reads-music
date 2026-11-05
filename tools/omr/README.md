@@ -128,8 +128,8 @@ call:
 | `"key_changes": {"125": 0}` | A key change Audiveris read but failed to export: writes it into the parts that lack it and respells the notes the old key altered |
 | `"patches": {"Oboe": {"121": "1/2 1/2 +r:1/2 ..."}}` | Hand corrections to single bars, for what no tool reads (a tuplet, a grace note, a word Audiveris missed), applied last: edit the existing notes (lengths, re-pitch, insert, delete) so lyrics and marks survive, or replace a voice; fingered tremolos as `F4+Bb4/D5:2`; see `repair.py --help` |
 | `"vocal_parts": ["Voice"]` | Parts whose lyrics are lyrics; elsewhere dynamics, accents and instructions Audiveris read as lyrics become marks again (the default is just "Voice") |
-| `"drum_key": {"F5 x": 51}` | Extra drum sounds by stave position and notehead; every drum note gets its instrument, hands stems up, feet stems down |
-| `"drum_grooves": {...}` | Writes whole kit grooves (hi-hats included, which Audiveris misses) into the bars whose kick and snare match, or into listed bars; see `repair.py --help` |
+| `"drum_key": {"F5 x": 51}` | Extra drum sounds by stave position and notehead, as General MIDI numbers (named as General MIDI names them); every drum note gets its instrument, hands stems up, feet stems down |
+| `"drum_grooves": {...}` | Writes whole kit bars (hi-hats, slashes, triplets, flams, rolls, a second hands voice) into the bars whose kick and snare match, or into listed bars, with the bars' words and dynamics (`"marks"`); see `repair.py --help` |
 | `"combine": [{"parts": ["Harp", "Piano"], "name": "Harp & Piano"}]` | Two parts onto one part's staves, to fit a template with fewer staves: the same notes written once, different notes as two voices. It copies written pitch as it is, so both parts must be in the same transposition |
 | `"labels": {"Double Bass": {"abbreviation": "D.B.", "program": 44}}` | A part's abbreviation and playback sound (General MIDI program), where the built-in table in `repair.py` gets them wrong |
 | `"stack": [["P312", "P313"]]` | A grand stave Audiveris read as two single-stave parts: the second goes on the first as its stave 2. Name the first in `aliases` |

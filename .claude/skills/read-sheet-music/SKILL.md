@@ -225,6 +225,19 @@ Part names on a scan are mostly unreadable ("Voice"), so the draft's
 placing by name fails. A full score keeps one order of staves on every
 page: place fragments by that order, clef and stave count, and look at
 the pages that don't fit (`merge.json` `stack` for a grand stave read as
-two parts, `drop` for a part read from text). Drum parts suffer most:
-`"drum_grooves"` in `merge.json` writes a whole groove into every bar whose
-kick and snare match (`repair.py --help`). Look at every bar you patch.
+two parts, `drop` for a part read from text). Look at every bar you patch.
+
+Drum parts suffer most: on a poor scan Audiveris reads no slashes and no
+x heads, and little of the kit figures. A kit part is mostly a few figures
+repeated, so transcribing it by eye is a few hours' work, not days:
+- Cut the drum stave out of every page, enlarged, a few pages per
+  picture, and read them with Read.
+- Write the transcription to a file in `library/<piece>/` as you go,
+  bar by bar, so an interruption loses nothing.
+- Build `"drum_grooves"` from it: each distinct bar once, with its
+  `"bars"` list, and the cues ("closed hat", "Fill", "Cowbell") and
+  dynamics in `"marks"`.
+- A stave space on a 117 DPI scan is under 5 px, so a head's position
+  is uncertain by a step. Where the page names the instrument, use one
+  position per instrument and give it its sound in `"drum_key"`.
+- Say which bars you were unsure of.
