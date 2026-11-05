@@ -74,6 +74,39 @@ RUN if [ "$WITH_PLAYWRIGHT" = 1 ]; then \
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright/ms-playwright
 ENV NODE_PATH=/opt/playwright/node_modules
 
+# Audiveris reads sheet music into MusicXML. Its package brings its own Java and
+# puts every file under /opt/audiveris; the Ubuntu 22.04 build is the one whose
+# glibc this Debian base satisfies. The package is unpacked, not installed: its
+# postinst only registers a desktop menu entry and MIME type, which fails with
+# no desktop and aborts the install.
+# The apt line is what a headless read loads from outside /opt/audiveris
+# (fontconfig with one font, freetype, libpng; the rest is in the base), not the
+# package's Depends, which are for its desktop GUI: X11, ALSA, and GTK, which
+# alone drags in 83 packages (systemd, dbus, CUPS) and 119 MB. GTK is loaded
+# only by Audiveris's HiDPI probe, which -Dsun.java2d.uiScale=1 skips; that
+# flag is on every run through tools/omr/audiveris.py. The
+# /opt/audiveris/bin/Audiveris launcher does not pass it, so it is not used.
+# The English model must be the full tessdata one: Audiveris starts Tesseract in
+# legacy mode, which tessdata_fast models lack, and then runs with text
+# recognition silently off. The Python libraries render and merge PDF pages.
+ARG WITH_AUDIVERIS=0
+ARG AUDIVERIS_VERSION=5.11.0
+RUN if [ "$WITH_AUDIVERIS" = 1 ]; then \
+      curl -fsSL -o /tmp/audiveris.deb \
+        "https://github.com/Audiveris/audiveris/releases/download/${AUDIVERIS_VERSION}/Audiveris-${AUDIVERIS_VERSION}-ubuntu22.04-x86_64.deb" \
+      && apt-get update \
+      && apt-get install -y --no-install-recommends libfontconfig1 libfreetype6 libpng16-16 \
+      && dpkg-deb -x /tmp/audiveris.deb / \
+      && /opt/audiveris/lib/runtime/bin/java -version \
+      && rm -f /tmp/audiveris.deb \
+      && rm -rf /var/lib/apt/lists/* \
+      && mkdir -p /opt/audiveris-tessdata \
+      && curl -fsSL -o /opt/audiveris-tessdata/eng.traineddata \
+        "https://github.com/tesseract-ocr/tessdata/raw/4.1.0/eng.traineddata" \
+      && pip install --break-system-packages --no-cache-dir \
+        "pillow==12.3.0" "pymupdf==2.1" "pypdf==6.21.4"; \
+    fi
+
 # --break-system-packages is safe in a single-purpose image: nothing else
 # depends on this Python. pytest is always here because tests/kit/ ships in
 # every project made from the kit.

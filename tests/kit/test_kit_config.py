@@ -53,7 +53,7 @@ def test_build_args_exist_in_the_dockerfile_with_kit_env_defaults(kit_root):
     # A project turns toggles on in kit.env, so only the versions must agree; a
     # bare `docker build` gets every toggle off.
     env = kit_env(kit_root)
-    for name in ("NODE_MAJOR", "PLAYWRIGHT_VERSION"):
+    for name in ("NODE_MAJOR", "PLAYWRIGHT_VERSION", "AUDIVERIS_VERSION"):
         assert args[name].strip('"') == env[name], f"Dockerfile default for {name} differs from kit.env"
     for name in KIT_DEFAULTS:
         if name.startswith("WITH_"):
@@ -79,10 +79,11 @@ def test_settings_json_hooks_exist(kit_root):
     assert "Bash(sh scripts/gh-agent.sh pr merge *)" in settings["permissions"]["deny"]
 
 
-def test_playwright_lives_in_an_allowed_directory(kit_root):
+@pytest.mark.parametrize("path", ["/opt/playwright", "/opt/audiveris", "/opt/audiveris-tessdata"])
+def test_toolchains_live_in_an_allowed_directory(kit_root, path):
     settings = json.loads((kit_root / ".claude" / "settings.json").read_text())
     dockerfile = (kit_root / ".devcontainer" / "Dockerfile").read_text()
-    assert "/opt/playwright" in dockerfile
+    assert path in dockerfile
     assert "/opt" in settings["permissions"]["additionalDirectories"]
 
 
@@ -147,6 +148,7 @@ STUB = '() { printf "%s\\n" "docker $*" >> "$STUB_LOG"; [ "$1" != image ]; }'
 KIT_DEFAULTS = {
     "WITH_RUBY": "0",
     "WITH_PLAYWRIGHT": "0",
+    "WITH_AUDIVERIS": "0",
     "WITH_PY_REQS": "0",
     "PORTS": '""',
     "EXTRA_ALLOWED_DOMAINS": '""',
@@ -209,6 +211,21 @@ def test_run_sh_toggles_and_flags(project):
     assert "init-firewall.sh" in run
 
 
+def test_run_sh_passes_audiveris_to_the_build(project):
+    done, calls = run_sh(project)
+    assert done.returncode == 0, done.stderr
+    build = next(c for c in calls if c.startswith("docker build"))
+    assert "WITH_AUDIVERIS=0" in build and "AUDIVERIS_VERSION=5.11.0" in build
+
+    text = (project / ".devcontainer" / "kit.env").read_text()
+    text = text.replace("WITH_AUDIVERIS=0", "WITH_AUDIVERIS=1").replace(
+        "AUDIVERIS_VERSION=5.11.0", "AUDIVERIS_VERSION=5.12.1")
+    done, calls = run_sh(project, kit_env_text=text)
+    assert done.returncode == 0, done.stderr
+    build = next(c for c in calls if c.startswith("docker build"))
+    assert "WITH_AUDIVERIS=1" in build and "AUDIVERIS_VERSION=5.12.1" in build
+
+
 def test_run_sh_build_only_does_not_run(project):
     done, calls = run_sh(project, "--build-only")
     assert done.returncode == 0, done.stderr
@@ -254,6 +271,9 @@ def test_kit_local_env_takes_only_the_name(project):
 @pytest.mark.parametrize("edit,message", [
     (("WITH_RUBY=0", "WITH_RUBBY=1"), "unknown key"),
     (("WITH_RUBY=0", "WITH_RUBY=yes"), "must be 0 or 1"),
+    (("WITH_AUDIVERIS=0", "WITH_AUDIVERIS=2"), "must be 0 or 1"),
+    (("AUDIVERIS_VERSION=5.11.0", "AUDIVERIS_VERSION=5.11"), "is not N.N.N"),
+    (("AUDIVERIS_VERSION=5.11.0", "AUDIVERIS_VERSION=latest"), "is not N.N.N"),
     (('PORTS=""', 'PORTS="80"'), "host:container"),
     (('EXTRA_ALLOWED_DOMAINS=""', 'EXTRA_ALLOWED_DOMAINS="a.com;b"'), "not a hostname"),
     (("PROJECT_NAME=demo", "PROJECT_NAME=changeme"), "set-project-name"),

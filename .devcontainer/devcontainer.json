@@ -1,12 +1,12 @@
 {
-  "name": "changeme (sandboxed)",
+  "name": "helen-reads-music (sandboxed)",
   "initializeCommand": "bash .devcontainer/run.sh --build-only",
-  "image": "changeme-devcontainer",
+  "image": "helen-reads-music-devcontainer",
   "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind",
   "workspaceFolder": "/workspace",
   "mounts": [
-    "source=changeme-claude-config,target=/state/claude-config,type=volume",
-    "source=changeme-bundle-cache,target=/state/bundle,type=volume"
+    "source=helen-reads-music-claude-config,target=/state/claude-config,type=volume",
+    "source=helen-reads-music-bundle-cache,target=/state/bundle,type=volume"
   ],
   "remoteEnv": {
     "AGENT_GH_TOKEN": "${localEnv:AGENT_GH_TOKEN}"
