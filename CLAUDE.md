@@ -1,4 +1,4 @@
-# Claude Code Rules for <PROJECT>
+# Claude Code Rules for Helen Reads Music
 
 **This file is the RULES.** It loads into every session, so keep it short. Where
 a rule names a hook, the hook enforces it. Where it names none, this paragraph
@@ -13,7 +13,8 @@ is the only enforcement.
   Tell me which.
 - **Scratch files go in this project's `tmp/`** (gitignored), never the system
   `/tmp`, never `~`.
-- <Project build / test / serve commands go here.>
+- Tests: `python3 -m pytest -q`. Read a piece of music: the
+  `read-sheet-music` skill has the steps (`tools/omr/README.md` the tools).
 - **Show me a branch on a server; never ask me to pull and build.** Read
   `PORTS` in `.devcontainer/kit.env` (`host:container` pairs), run `ss -ltn`
   and take a free container port, serve your own worktree in the background on
@@ -61,6 +62,11 @@ is the only enforcement.
   `chmod`, `chown` or `sudo`. A yes to one is not a yes to the next.
   `.claude/settings.json` denies all three.
 - NEVER read or create `.env` files or `.claude/settings.local.json`.
+- **Music never reaches git.** Every score, and everything made from one
+  (MusicXML, `.mxl`, `.omr`, merge configs, reports), lives in the gitignored
+  `library/<piece>/`, never in `tmp/` and never anywhere tracked. The scores
+  are licensed to me; a push publishes them. Tests use public-domain or
+  generated music, made at run time. `guard-music-in-git.py` enforces it.
 - NEVER alter shell dotfiles or system configuration.
 
 ## Git workflow
