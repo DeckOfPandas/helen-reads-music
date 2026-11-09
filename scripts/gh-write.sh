@@ -11,11 +11,12 @@
 #   sh scripts/gh-write.sh issue-label  <repo> <number> <label>
 #   sh scripts/gh-write.sh label-create <repo> <label> <rrggbb>
 #
-# <repo> is a bare name from GH_REPOS in the GitHub config. A PR's base is
+# <repo> is a bare name from GH_REPOS in the GitHub config; a repo in
+# PR_ONLY_REPOS takes pr-create and pr-body only. A PR's base is
 # always main and its head never is. `comment` and `issue-label` take an
-# issue or PR number. A label is letters, digits, dots, dashes and underscores;
-# a colour is six hex digits with no #. `issue-label` adds one label that
-# already exists and removes none. One label per issue, and never issues in
+# issue or PR number. A label is letters, digits, dots, dashes, underscores
+# and single spaces; a colour is six hex digits with no #. `issue-label` and
+# `issue-create` check that the label already exists, and remove none. One label per issue, and never issues in
 # a burst.
 #
 # It cannot merge, approve, close, delete, change a title or state, or touch
@@ -31,8 +32,33 @@ usage="usage: sh scripts/gh-write.sh pr-create <repo> <branch> \"<title>\" tmp/<
 
 check_label() {
   case "$1" in
-    '' | -* | *[!A-Za-z0-9._-]*) refuse "'$1' is not a plain label name" ;;
+    '' | -* | ' '* | *' ' | *'  '* | *[!A-Za-z0-9._\ -]*)
+      refuse "'$1' is not a plain label name (letters, digits, . _ - and single spaces)" ;;
   esac
+}
+
+# A label's URL path segment: the space is the only character check_label
+# lets through that a path cannot carry.
+encode_label() {
+  rest="$1"
+  out=
+  while :; do
+    case "$rest" in
+      *' '*) out="$out${rest%% *}%20"; rest="${rest#* }" ;;
+      *) out="$out$rest"; break ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
+# GitHub creates a label it is given that does not exist, so a typo becomes a
+# new label. label-create is the only way one is made. Skipped in a dry run,
+# which never reaches the network.
+require_label() {
+  [ -z "${AGENT_WRAPPER_DRY_RUN:-}" ] || return 0
+  sh "$here/gh-agent.sh" api --method GET \
+    "repos/$GH_OWNER/$1/labels/$(encode_label "$2")" --jq .name >/dev/null 2>&1 \
+    || refuse "'$2' is not an existing label on $1 -- label-create makes one"
 }
 
 check_colour() {
@@ -95,7 +121,7 @@ case "$action" in
     ;;
   comment)
     [ "$#" -eq 3 ] || refuse "$usage"
-    check_repo "$1"
+    check_issue_repo "$1"
     check_number "$2"
     check_body "$3"
     set -- sh "$here/gh-agent.sh" api --method POST "repos/$GH_OWNER/$1/issues/$2/comments" \
@@ -104,11 +130,12 @@ case "$action" in
     ;;
   issue-create)
     [ "$#" -eq 3 ] || [ "$#" -eq 4 ] || refuse "$usage"
-    check_repo "$1"
+    check_issue_repo "$1"
     [ -n "$2" ] || refuse "an issue needs a title"
     check_body "$3"
     if [ "$#" -eq 4 ]; then
       check_label "$4"
+      require_label "$1" "$4"
       set -- sh "$here/gh-agent.sh" api --method POST "repos/$GH_OWNER/$1/issues" \
         -f "title=$2" -F "body=@$3" -f "labels[]=$4" \
         --jq '[.number, .html_url, .user.login] | @tsv'
@@ -120,16 +147,17 @@ case "$action" in
     ;;
   issue-label)
     [ "$#" -eq 3 ] || refuse "$usage"
-    check_repo "$1"
+    check_issue_repo "$1"
     check_number "$2"
     check_label "$3"
+    require_label "$1" "$3"
     set -- sh "$here/gh-agent.sh" api --method POST "repos/$GH_OWNER/$1/issues/$2/labels" \
       -f "labels[]=$3" \
       --jq '[.[].name] | @tsv'
     ;;
   label-create)
     [ "$#" -eq 3 ] || refuse "$usage"
-    check_repo "$1"
+    check_issue_repo "$1"
     check_label "$2"
     check_colour "$3"
     set -- sh "$here/gh-agent.sh" api --method POST "repos/$GH_OWNER/$1/labels" \

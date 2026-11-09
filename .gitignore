@@ -7,6 +7,8 @@ __pycache__/
 .claude/worktrees/
 scripts/github.local.conf
 .devcontainer/kit.local.env
+# A clone of the kit, for sending it changes (NESTED_DIRS in github.local.conf).
+helen-contains-claude-webdev/
 
 # Music is licensed, never published: scores and everything made from them
 # live in library/. The patterns are case-blind because git on Linux is not.

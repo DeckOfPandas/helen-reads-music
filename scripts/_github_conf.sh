@@ -37,7 +37,10 @@ conf_path() {
     printf '%s' "$here/github.local.conf"
     return
   fi
-  common="$(git -C "$here" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+  # git-remote-https hands the credential helper the pushing repo's GIT_DIR,
+  # relative to a nested clone, which would hide this checkout's own.
+  common="$(unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE
+    git -C "$here" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
   if [ -n "$common" ] && [ -f "$(dirname "$common")/scripts/github.local.conf" ]; then
     printf '%s' "$(dirname "$common")/scripts/github.local.conf"
     return
@@ -50,11 +53,16 @@ load_conf() {
   GH_REPOS=""
   GH_AGENT_USER=""
   MAIN_PUSH_REPOS=""
+  PR_ONLY_REPOS=""
   NESTED_DIRS=""
   conf="$(conf_path)"
   conf_name="${conf##*/}"
   [ -f "$conf" ] || refuse "$conf is missing"
+  # A Windows editor saves CRLF; without this every value ends in a CR, and
+  # the checks below refuse names that look right.
+  cr="$(printf '\r')"
   while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%"$cr"}"
     line="${line%%#*}"
     case "$line" in
       *[!\ \	]*) ;;
@@ -71,6 +79,7 @@ load_conf() {
       GH_REPOS) GH_REPOS="$value" ;;
       GH_AGENT_USER) GH_AGENT_USER="$value" ;;
       MAIN_PUSH_REPOS) MAIN_PUSH_REPOS="$value" ;;
+      PR_ONLY_REPOS) PR_ONLY_REPOS="$value" ;;
       NESTED_DIRS) NESTED_DIRS="$value" ;;
       *) refuse "$conf_name:unknown key '$key'" ;;
     esac
@@ -93,11 +102,42 @@ load_conf() {
   for repo in $MAIN_PUSH_REPOS; do
     in_list "$repo" $GH_REPOS || refuse "$conf_name:MAIN_PUSH_REPOS names '$repo', which is not in GH_REPOS"
   done
-  for dir in $NESTED_DIRS; do
-    case "$dir" in
-      -* | .* | *[!A-Za-z0-9._-]*) refuse "$conf_name:NESTED_DIRS '$dir' is not one folder name in this checkout" ;;
-    esac
+  # A PR-only repo's main moves only by a merged PR, so it is never a main-push repo.
+  # shellcheck disable=SC2086
+  for repo in $PR_ONLY_REPOS; do
+    in_list "$repo" $GH_REPOS || refuse "$conf_name:PR_ONLY_REPOS names '$repo', which is not in GH_REPOS"
+    ! in_list "$repo" $MAIN_PUSH_REPOS || refuse "$conf_name:'$repo' is in both PR_ONLY_REPOS and MAIN_PUSH_REPOS"
   done
+  # An entry is `path` or `path:repo`; the repo is only for
+  # session-ground-truth.py's clone hint. NESTED_DIRS leaves holding paths only.
+  # A path is folder names joined by `/`, each one plain and not starting `.`
+  # or `-`, so it can name neither `..`, `.git`, an option nor anywhere outside.
+  folders=""
+  for entry in $NESTED_DIRS; do
+    dir="${entry%%:*}"
+    case "$dir" in
+      "" | /* | */ | *//* | *[!A-Za-z0-9._/-]*)
+        refuse "$conf_name:NESTED_DIRS '$dir' is not a folder path in this checkout" ;;
+    esac
+    rest="$dir"
+    while [ -n "$rest" ]; do
+      part="${rest%%/*}"
+      case "$part" in
+        -* | .*) refuse "$conf_name:NESTED_DIRS '$dir' has a folder name starting '-' or '.'" ;;
+      esac
+      case "$rest" in
+        */*) rest="${rest#*/}" ;;
+        *) rest="" ;;
+      esac
+    done
+    case "$entry" in
+      *:*)
+        # shellcheck disable=SC2086
+        in_list "${entry#*:}" $GH_REPOS || refuse "$conf_name:NESTED_DIRS '$entry' names a repo not in GH_REPOS" ;;
+    esac
+    folders="${folders:+$folders }$dir"
+  done
+  NESTED_DIRS="$folders"
   # shellcheck disable=SC2086
   set -- $GH_REPOS
   DEFAULT_REPO="$1"
@@ -106,6 +146,13 @@ load_conf() {
 check_repo() {
   # shellcheck disable=SC2086
   in_list "$1" $GH_REPOS || refuse "'$1' is not one of the repos in $conf_name ($GH_REPOS)"
+}
+
+# For a write other than opening or editing a PR: comment, issue, label.
+check_issue_repo() {
+  check_repo "$1"
+  # shellcheck disable=SC2086
+  ! in_list "$1" $PR_ONLY_REPOS || refuse "'$1' is in PR_ONLY_REPOS in $conf_name: open and edit PRs there, nothing else"
 }
 
 # A path relative to this checkout: no absolute path, no `..`, no option.

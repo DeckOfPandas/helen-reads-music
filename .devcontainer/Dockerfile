@@ -77,16 +77,15 @@ ENV NODE_PATH=/opt/playwright/node_modules
 # Audiveris reads sheet music into MusicXML. Its package brings its own Java and
 # puts every file under /opt/audiveris; the Ubuntu 22.04 build is the one whose
 # glibc this Debian base satisfies. The package is unpacked, not installed: its
-# postinst only registers a desktop menu entry and MIME type, which fails with
-# no desktop and aborts the install.
-# The apt line is what a headless read loads from outside /opt/audiveris
-# (fontconfig with one font, freetype, libpng; the rest is in the base), not the
-# package's Depends, which are for its desktop GUI: X11, ALSA, and GTK, which
-# alone drags in 83 packages (systemd, dbus, CUPS) and 119 MB. GTK is loaded
-# only by Audiveris's HiDPI probe, which -Dsun.java2d.uiScale=1 skips; that
-# flag is on every run through tools/omr/audiveris.py. The
-# /opt/audiveris/bin/Audiveris launcher does not pass it, so it is not used.
-# The English model must be the full tessdata one: Audiveris starts Tesseract in
+# postinst registers a desktop menu entry and MIME type, which fails with no
+# desktop and aborts the install.
+#
+# The apt line is what a headless read loads from outside /opt/audiveris, not
+# the package's Depends, which are for its desktop GUI (X11, ALSA, GTK). GTK is
+# loaded only by the HiDPI probe, which -Dsun.java2d.uiScale=1 skips, so every
+# run must pass that flag; the /opt/audiveris/bin/Audiveris launcher does not.
+#
+# The English model is the full tessdata one: Audiveris starts Tesseract in
 # legacy mode, which tessdata_fast models lack, and then runs with text
 # recognition silently off. The Python libraries render and merge PDF pages.
 ARG WITH_AUDIVERIS=0
@@ -150,6 +149,12 @@ RUN chmod 0755 /usr/local/bin/init-firewall.sh \
       if [ "$WITH_PY_REQS" = 1 ]; then printf '%s\n' pypi.org files.pythonhosted.org; fi; \
       for domain in $EXTRA_ALLOWED_DOMAINS; do printf '%s\n' "$domain"; done; \
     } > /etc/claude-kit/allowed-domains
+
+# Managed settings apply to every Claude session in the container, wherever it
+# starts, and root owns them, so nothing inside can switch the hook off. It
+# warns a session started in a nested clone, where the project's hooks don't run.
+COPY managed-settings.json /etc/claude-code/managed-settings.json
+COPY session-place.py /usr/local/share/claude-kit/session-place.py
 
 # container.bashrc guards against host dotfiles that reload ~/.bashrc.
 COPY container.bashrc /usr/local/share/claude-kit/container.bashrc

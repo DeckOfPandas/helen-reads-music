@@ -50,14 +50,29 @@ def test_build_args_exist_in_the_dockerfile_with_kit_env_defaults(kit_root):
     block = re.search(r"BUILD_ARGS=\(\n(.*?)\n\)", run_sh, re.DOTALL).group(1)
     for name in re.findall(r'"(\w+)=', block) + ["CLAUDE_CODE_VERSION"]:
         assert name in args, f"run.sh passes {name}, which the Dockerfile never declares"
-    # A project turns toggles on in kit.env, so only the versions must agree; a
-    # bare `docker build` gets every toggle off.
-    env = kit_env(kit_root)
+    # A project sets its own versions and toggles in kit.env, so the Dockerfile's
+    # defaults agree with run.sh's; a bare `docker build` gets every toggle off.
+    defaults = run_sh_defaults(run_sh)
     for name in ("NODE_MAJOR", "PLAYWRIGHT_VERSION", "AUDIVERIS_VERSION"):
-        assert args[name].strip('"') == env[name], f"Dockerfile default for {name} differs from kit.env"
+        assert args[name].strip('"') == defaults[name], f"Dockerfile default for {name} differs from run.sh's"
     for name in KIT_DEFAULTS:
         if name.startswith("WITH_"):
             assert args[name].strip('"') == "0", f"Dockerfile default for {name} is not off"
+
+
+def run_sh_defaults(run_sh: str) -> dict[str, str]:
+    block = re.search(r"^PROJECT_NAME=\"\"\n(.*?)\n\n", run_sh, re.DOTALL | re.MULTILINE).group(1)
+    return {k: v.strip("\"'") for k, v in re.findall(r"^(\w+)=(.*)$", block, re.MULTILINE)}
+
+
+def test_the_kits_kit_env_ships_run_sh_defaults(kit_root):
+    if not (kit_root / "kit" / "manifest").is_file():
+        pytest.skip("a project's kit.env holds its own values; the kit checks its template")
+    defaults = run_sh_defaults((kit_root / ".devcontainer" / "run.sh").read_text())
+    env = kit_env(kit_root)
+    assert defaults, "read no defaults from run.sh -- has its layout changed?"
+    for name, value in defaults.items():
+        assert env[name] == value, f"the kit's kit.env ships {name}={env[name]}, run.sh defaults to {value}"
 
 
 def test_python_packages_are_pinned(kit_root):
@@ -126,8 +141,17 @@ def test_host_dotfiles_that_reload_bashrc_do_not_loop(tmp_path, kit_root):
     assert (tmp_path / "passes").read_text().count("pass") == 6
 
 
+def copy_build_inputs(kit_root: Path, dest: Path) -> None:
+    """What set-project-name.py and tools/kit/build.py need to run in `dest`."""
+    shutil.copytree(kit_root / ".devcontainer", dest / ".devcontainer")
+    shutil.copytree(kit_root / "tools" / "kit", dest / "tools" / "kit")
+    (dest / ".claude" / "kit").mkdir(parents=True)
+    shutil.copy(kit_root / ".claude" / "kit" / "settings.kit.json", dest / ".claude" / "kit")
+    shutil.copy(kit_root / ".claude" / "settings.project.json", dest / ".claude")
+
+
 def test_set_project_name(tmp_path, kit_root):
-    shutil.copytree(kit_root / ".devcontainer", tmp_path / ".devcontainer")
+    copy_build_inputs(kit_root, tmp_path)
     done = subprocess.run(["python3", ".devcontainer/set-project-name.py", "my-site"],
                           cwd=tmp_path, capture_output=True, text=True)
     assert done.returncode == 0, done.stderr
@@ -158,7 +182,7 @@ KIT_DEFAULTS = {
 
 @pytest.fixture
 def project(tmp_path: Path, kit_root: Path) -> Path:
-    shutil.copytree(kit_root / ".devcontainer", tmp_path / ".devcontainer")
+    copy_build_inputs(kit_root, tmp_path)
     (tmp_path / ".devcontainer" / "kit.local.env").unlink(missing_ok=True)
     kit = tmp_path / ".devcontainer" / "kit.env"
     text = kit.read_text()
@@ -253,6 +277,29 @@ def test_run_sh_in_a_worktree_builds_its_kit_and_mounts_the_primary(project, kit
     assert f"-v {project}:/workspace" in run and "--name demo-primary" in run
 
 
+def test_run_sh_in_a_worktree_needs_nothing_from_the_primarys_devcontainer(project):
+    """A project adopting the kit runs the branch's run.sh from a worktree
+    while its primary checkout still holds the old .devcontainer/. run.sh
+    reads the primary's settings.local.json, but every script it runs is
+    its own."""
+    worktree = project / ".claude" / "worktrees" / "wt"
+    shutil.copytree(project / ".devcontainer", worktree / ".devcontainer")
+    (worktree / ".git").write_text("gitdir: /no/such/.git/worktrees/wt\n")
+    for name in ("read_local_token.py", "build_inputs_hash.py", "claude_code_latest.py"):
+        (project / ".devcontainer" / name).unlink()
+    (project / ".claude").mkdir(exist_ok=True)
+    (project / ".claude" / "settings.local.json").write_text('{"env": {"AGENT_GH_TOKEN": "x"}}')
+    log = project / "docker.log"
+    log.write_text("")
+    env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": str(project / "home"),
+           "STUB_LOG": str(log), "PIN_CLAUDE_CODE": "9.9.9", "BASH_FUNC_docker%%": STUB}
+    done = subprocess.run(["bash", str(worktree / ".devcontainer" / "run.sh")], cwd=worktree,
+                          capture_output=True, text=True, env=env, timeout=60)
+    assert done.returncode == 0, done.stderr
+    run = next(c for c in log.read_text().splitlines() if c.startswith("docker run"))
+    assert "-e AGENT_GH_TOKEN" in run, "the primary's settings.local.json token was not passed"
+
+
 def test_kit_local_env_overrides_the_name(project):
     text = (project / ".devcontainer" / "kit.env").read_text().replace("PROJECT_NAME=demo", "PROJECT_NAME=changeme")
     (project / ".devcontainer" / "kit.local.env").write_text("# mine\nPROJECT_NAME=mine\n")
@@ -261,11 +308,43 @@ def test_kit_local_env_overrides_the_name(project):
     assert "--name mine-primary" in next(c for c in calls if c.startswith("docker run"))
 
 
-def test_kit_local_env_takes_only_the_name(project):
+def test_kit_local_env_ports_replace_kit_envs(project):
+    text = (project / ".devcontainer" / "kit.env").read_text().replace('PORTS=""', 'PORTS="5998:4000"')
+    (project / ".devcontainer" / "kit.local.env").write_text('PORTS="6000:6000 6001:6001"\n')
+    done, calls = run_sh(project, kit_env_text=text)
+    assert done.returncode == 0, done.stderr
+    run = next(c for c in calls if c.startswith("docker run"))
+    assert "-p 6000:6000" in run and "-p 6001:6001" in run and "5998" not in run
+    assert "-e KIT_PORTS=6000:6000 6001:6001" in run
+
+
+def test_run_sh_passes_kit_envs_ports_when_there_is_no_local_file(project):
+    text = (project / ".devcontainer" / "kit.env").read_text().replace('PORTS=""', 'PORTS="5998:4000"')
+    done, calls = run_sh(project, kit_env_text=text)
+    assert done.returncode == 0, done.stderr
+    assert "-e KIT_PORTS=5998:4000" in next(c for c in calls if c.startswith("docker run"))
+
+
+def test_kit_local_env_validates_its_ports(project):
+    (project / ".devcontainer" / "kit.local.env").write_text('PORTS="80"\n')
+    done, calls = run_sh(project)
+    assert done.returncode == 1 and "host:container" in done.stderr
+    assert calls == []
+
+
+def test_kit_local_env_takes_only_the_name_and_ports(project):
     (project / ".devcontainer" / "kit.local.env").write_text("WITH_RUBY=1\n")
     done, calls = run_sh(project)
-    assert done.returncode == 1 and "only PROJECT_NAME" in done.stderr
+    assert done.returncode == 1 and "only PROJECT_NAME and PORTS" in done.stderr
     assert calls == []
+
+
+def test_the_local_example_is_all_comments(kit_root):
+    """Copied as it stands, it changes nothing: every setting is a line to
+    uncomment."""
+    lines = (kit_root / ".devcontainer" / "kit.local.example.env").read_text().splitlines()
+    assert all(not line.strip() or line.startswith("#") for line in lines)
+    assert any(line.startswith("#PORTS=") for line in lines)
 
 
 @pytest.mark.parametrize("edit,message", [
