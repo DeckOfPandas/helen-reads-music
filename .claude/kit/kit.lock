@@ -1,6 +1,6 @@
 {
   "kit_repo": "helen-contains-claude-webdev",
-  "kit_commit": "ddbbe2433882c1a5e3ede04544f18f5e2b8971d3",
+  "kit_commit": "9c7af0a9f6fea587a74eae70e1d6a18e565d3a60",
   "files": {
     ".claude/hooks/README.md": "0ba773835a2737e2b19e527596d17909426c7c401855a19b5672110434766979",
     ".claude/hooks/guard-awk.py": "3dd599df8eea1f323791bd5733302d896bd6b0813a014b24bb6783087149ad72",
