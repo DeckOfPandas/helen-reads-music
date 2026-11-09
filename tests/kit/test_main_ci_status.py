@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from test_wrappers import ok, project, refused, run  # noqa: F401  (project is a fixture)
+from .test_wrappers import ok, project, refused, run  # noqa: F401  (project is a fixture)
 
 REPO = "acme/site"
 

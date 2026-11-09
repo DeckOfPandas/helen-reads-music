@@ -7,9 +7,24 @@ from pathlib import Path
 
 import pytest
 
-from conftest import KIT_ROOT, denied, run_hook
+ROOT = Path(__file__).resolve().parents[1]
+HOOK = ROOT / ".claude" / "hooks" / "guard-music-in-git.py"
 
-HOOK = KIT_ROOT / ".claude" / "hooks" / "guard-music-in-git.py"
+
+def run_hook(hook: Path, command: str, cwd: Path) -> dict | None:
+    """Feed a Bash PreToolUse payload to a hook; its JSON verdict, or None."""
+    done = subprocess.run(
+        ["python3", str(hook)],
+        input=json.dumps({"tool_name": "Bash", "tool_input": {"command": command}}),
+        capture_output=True, text=True, cwd=cwd, timeout=30,
+        env={"PATH": "/usr/local/bin:/usr/bin:/bin", "CLAUDE_PROJECT_DIR": str(cwd)},
+    )
+    assert done.returncode == 0, done.stderr
+    return json.loads(done.stdout) if done.stdout.strip() else None
+
+
+def denied(verdict: dict | None) -> bool:
+    return bool(verdict) and verdict["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 MUSIC_FILES = ["score.pdf", "Score.PDF", "part.mxl", "a.musicxml", "book.omr",
                "library/notes.txt", "library/piece/merge.json"]
@@ -108,19 +123,19 @@ def test_a_heredoc_may_discuss_music_files(repo):
 @pytest.mark.parametrize("name", MUSIC_FILES + ["deep/dir/x.Mxl"])
 def test_gitignore_ignores_music(name):
     done = subprocess.run(["git", "check-ignore", "-q", "--no-index", "--", name],
-                          cwd=KIT_ROOT, capture_output=True)
+                          cwd=ROOT, capture_output=True)
     assert done.returncode == 0, f".gitignore does not ignore {name}"
 
 
 @pytest.mark.parametrize("name", ["tools/omr/run.py", "README.md", "tests/kit/conftest.py"])
 def test_gitignore_leaves_code_alone(name):
     done = subprocess.run(["git", "check-ignore", "-q", "--no-index", "--", name],
-                          cwd=KIT_ROOT, capture_output=True)
+                          cwd=ROOT, capture_output=True)
     assert done.returncode == 1, f".gitignore ignores {name}"
 
 
 def test_wired_into_settings_without_an_if():
-    settings = json.loads((KIT_ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    settings = json.loads((ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))
     hooks = [h for entry in settings["hooks"]["PreToolUse"] if entry.get("matcher") == "Bash"
              for h in entry["hooks"]]
     wired = [h for h in hooks if h["command"].endswith('/.claude/hooks/guard-music-in-git.py"')]

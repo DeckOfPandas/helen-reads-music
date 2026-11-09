@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import denied, run_hook
+from .conftest import denied, run_hook
 
 GIT = ["git", "-c", "user.name=t", "-c", "user.email=t@t"]
 

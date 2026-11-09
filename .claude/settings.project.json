@@ -1,0 +1,30 @@
+{
+  "_about": "This project's additions to the kit's .claude/kit/settings.kit.json. python3 tools/kit/build.py merges the two into .claude/settings.json: lists are joined, a kit value cannot be changed, and an allow rule that a deny rule covers is refused. Keys starting with _ never reach settings.json. _reviewedOpenRules maps each allow rule here ending in ' *' to the options of its tool you checked for running a program or writing a file anywhere.",
+  "_reviewedOpenRules": {
+    "Bash(ls /opt/*)": "ls has no option that runs a program or writes a file. The wildcard also accepts a second path or `..`, so it lists names anywhere the container user can see; it never reads a file's contents. For finding Audiveris under /opt/audiveris.",
+    "Bash(ls -la /opt/*)": "As Bash(ls /opt/*): ls runs nothing and writes nothing; it lists names and attributes, never contents."
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard-music-in-git.py\"",
+            "timeout": 20,
+            "statusMessage": "Checking no music is staged"
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Bash(ls /opt)",
+      "Bash(ls /opt/*)",
+      "Bash(ls -la /opt/*)"
+    ],
+    "deny": []
+  }
+}

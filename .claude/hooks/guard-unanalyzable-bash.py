@@ -36,18 +36,21 @@ Refused:
      runs the rest as a second command, which the checker sees as a fragment
      and asks the human about. It arrives in an unquoted URL query string.
      `&&` is shape 5; `2>&1`, `>&2` and `&>file` are redirections.
- 13. An unquoted word starting with `=`: zsh expands `=cmd` to that command's
-     path, so the checker cannot know the argument. It arrives as
-     `curl --proto =https`. A quoted `'=https'` and `--flag=value` pass.
+ 13. A word starting with `=` and a name: zsh expands `=cmd` to that command's
+     path, so the checker cannot know the argument. Unquoted, it arrives as
+     `curl --proto =https`. After a `|` the checker reads it as a new word
+     whatever the quoting, so a regex alternation `'a|=https'` or `"a|=cmd"`
+     is refused too. A quoted `'=https'`, `--flag=value` and a lone `=`
+     (`test a = b`) pass.
 
 Allowed on purpose, because a guard that fires on harmless commands gets
 routed around:
 
   * Redirection to a static path, `2>&1` and `>/dev/null` included: the file
     is named in the command text.
-  * Anything inside quotes, with two exceptions: shapes 2 and 11 are live
-    inside DOUBLE quotes, where the shell still expands them, and shape 7 is
-    about quoted text.
+  * Anything inside quotes, with three exceptions: shapes 2 and 11 are live
+    inside DOUBLE quotes, where the shell still expands them, shape 7 is
+    about quoted text, and shape 13's `|=name` is read inside any quotes.
   * A bare `$VAR`: too common in regexes and paths to judge, and the secret
     case belongs to `guard-token-expansion.py`.
   * An `=` that is not a leading assignment: `--flag=value`, and lowercase
@@ -91,6 +94,12 @@ _GLOB = re.compile(r"\*")
 # Shape 12, applied BEFORE _REDIRECT, which leaves `&> file` as a bare `&`.
 # Neither half of `&&`, nor the `&` of `2>&1`, `<&0` or `&>file`.
 _LONE_AMPERSAND = re.compile(r"(?<![&<>])&(?![&>])")
+
+# Shape 13. Unquoted: an `=` opening a word and followed by something, so a
+# lone `=` as in `test a = b` passes. Anywhere, quotes included: `|=` and a
+# name, which the checker reads as a new word even inside quotes.
+_EQUALS_WORD = re.compile(r"(?:^|\s)=\S")
+_EQUALS_AFTER_PIPE = re.compile(r"\|=[A-Za-z_]")
 
 # The only command shape 7 applies to: a committed wrapper run as `sh scripts/`.
 _SCRIPT_CALL = re.compile(r"^\s*sh\s+scripts/")
@@ -248,7 +257,13 @@ def _offence(command: str) -> tuple[str, str] | None:
                 "number,title`. To run something in the background, use the "
                 "Bash tool's run_in_background, never a trailing `&`")
 
-    if any(token.startswith("=") for token in scannable.split()):
+    if _EQUALS_AFTER_PIPE.search(command):
+        return ("`|=name` in an argument, which the checker reads as zsh's "
+                "`=cmd` expansion even inside quotes",
+                "keep `=` off the start of a regex alternative -- search with the "
+                "Read tool, or anchor the `=` mid-word (`proto=https`)")
+
+    if _EQUALS_WORD.search(scannable):
         return ("an unquoted word starting with `=`, which zsh expands to a "
                 "command's path (`=cmd`), so the checker cannot know it",
                 "single-quote the word: `curl --proto '=https'`")
