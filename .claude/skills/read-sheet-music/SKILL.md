@@ -33,7 +33,14 @@ Helen puts the PDFs (or page images) in `library/<piece>/`. Pages are taken
 in the order of the last number in each file name (`score_2` before
 `score_10`). Ask her which pages and which
 piece if it isn't obvious from what's there. Don't go looking outside
-`library/`.
+`library/`. One part is one piece: every PDF in a folder is read as pages
+of one score, so a second instrument's part goes in its own folder. Keep
+your own pictures in `omr/views/`: an image beside the PDFs is read as a
+scanned page. SVG pages become PDFs with `pages.py svg`.
+
+**Guitar tab** is not read by Audiveris: name the shapes (step 2), then
+`python3 tools/omr/tab.py library/<piece>` does the whole read
+(`tools/omr/README.md`, "Guitar tablature"), and steps 3 to 5 don't apply.
 
 Find out whether the PDF is a **drawing** (exported from notation software)
 or a **scan**:

@@ -101,6 +101,32 @@ To check a bar by eye, `vector.py picture library/<piece> <page> <stave>
 <first bar> <last bar>` writes a PNG of it to `omr/views/bars/`.
 `merge-report.txt` says which stave is which part on each page.
 
+## Guitar tablature
+
+Audiveris does not read tab. A tab part exported from notation software is
+a drawing like any other, and `tab.py` reads it alone, with no Audiveris
+pass:
+
+    python3 tools/omr/vector.py survey library/<piece>
+    python3 tools/omr/tab.py library/<piece> [--tuning E2,A2,D3,G3,B3,E4] [--keys 1:6,9:-4]
+
+Name the digits `fret-0` to `fret-9`, time-signature figures `time-3`,
+`time-4` (and so on), and the rests, flags and dots, in `glyphs.json`. The
+white masks behind fret numbers stay `other`. The reader takes six-line
+staves, each fret number's string from its line, and the rhythm from the
+stems below: a full stem is a crotchet, halved by each beam or flag at its
+foot; a short stem is a minim; no stem is a semibreve; dots follow a stem,
+its flag, or a rest. Ties join the same fret on the same string, across
+system breaks too. It writes `omr/<piece>-merged.musicxml`: a guitar stave
+(treble clef an octave down) whose notes carry `<string>` and `<fret>`, so
+notation software can show tab as well. Tab has no key signature, so each
+run of bars takes the key needing the fewest accidentals (`--keys` sets
+them instead); `omr/tab-report.txt` names the keys and every bar that
+doesn't add up. Tuplets, grace notes, bends and slides are not read.
+
+An SVG page becomes a PDF with `pages.py svg <page.svg> <out.pdf>`, still a
+drawing.
+
 ## Doublings
 
 Parts that play the same notes (harp and piano, bass guitar and double
@@ -176,7 +202,8 @@ articulations, noteheads, directions) changed.
 | `book.py` | Reads a PDF in chunks: retries, splits, resumes, joins |
 | `keep_reading.py` | Reruns `process.py` after interruptions, for a read left alone |
 | `pagefix.py` | Puts right a page read with the wrong number of bars |
-| `pages.py` | `merge`, `images`, `rerender`, `split`: getting pages into one readable PDF |
+| `pages.py` | `merge`, `images`, `rerender`, `split`, `svg`: getting pages into one readable PDF |
+| `tab.py` | Guitar tablature read from the drawing into MusicXML, with string and fret |
 | `score.py` | `check`, `names` and `diff` for any `.mxl` |
 | `draft.py` | Drafts `merge.json` from a read |
 | `merge.py` | The merge, on its own |

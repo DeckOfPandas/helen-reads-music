@@ -290,6 +290,22 @@ def test_a_chord_tied_on_past_the_system_end(tmp_path):
     assert [h.tie_start for h in chord.heads] == [True, True, True]
 
 
+def test_two_ties_drawn_as_one_path_are_two_ties(tmp_path):
+    # | C5 tied to C5, then E5 tied to E5 |, both ties in one filled path.
+    e = Engraver()
+    stave = e.stave(100.0, [50.0, 130.0])
+    heads = [e.note(stave, x, step, stem="down")[0] for x, step in ((60.0, 5), (75.0, 5), (95.0, 7), (110.0, 7))]
+    for first, second in ((heads[0], heads[1]), (heads[2], heads[3])):
+        x0, x1, y = first.x1 + 0.25, second.x0 - 0.25, first.y0 - 0.5
+        middle = (x0 + x1) / 2
+        e.shape.draw_bezier((x0, y), (middle - 1, y - 2.5), (middle + 1, y - 2.5), (x1, y))
+        e.shape.draw_bezier((x1, y), (middle + 1, y - 1.5), (middle - 1, y - 1.5), (x0, y))
+    e.shape.finish(color=None, fill=(0, 0, 0), closePath=False)
+    events = read_one_bar(e, tmp_path)["single"]
+    assert [(ev.heads[0].tie_start, ev.heads[0].tie_stop) for ev in events] == [
+        (True, False), (False, True), (True, False), (False, True)]
+
+
 def test_a_tie_with_blunt_ends_is_a_tie(tmp_path):
     e = Engraver()
     stave = e.stave(100.0, [50.0, 130.0])

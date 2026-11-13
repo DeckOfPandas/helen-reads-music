@@ -61,6 +61,10 @@ SHAPES = {
     "clef-bass": (7.5, 8.5, "polygon", 15),
     "clef-percussion": (3.0, 6.0, "polygon", 16),
     "accent": (4.0, 2.5, "polygon", 4),     # `catalogue` needs a shape that fills its box
+    "rest-16th": (3.5, 7.0, "polygon", 17),
+    "time-3": (3.0, 3.0, "polygon", 18),
+    "time-4": (3.0, 3.0, "polygon", 19),
+    **{f"fret-{n}": (1.75, 2.5, "polygon", 20 + n) for n in range(10)},    # tab digits, one shape each
 }
 
 

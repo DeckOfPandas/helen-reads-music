@@ -6,6 +6,7 @@ USAGE (from the repo root):
     python3 tools/omr/pages.py images   <folder-of-images> <out.pdf> [--dpi N]
     python3 tools/omr/pages.py rerender <in.pdf> <out.pdf> [--dpi N] [--max-pixels N]
     python3 tools/omr/pages.py split    <spread.png> <out-folder> [--upscale N] [--density F]
+    python3 tools/omr/pages.py svg      <page.svg> <out.pdf>
 
 merge     Per-page PDFs into one, in page-number order. Audiveris treats one
           file as one book: one PDF carries the key and time signature across
@@ -22,6 +23,10 @@ rerender  Re-renders each page at a higher DPI. Audiveris rasterizes every
 split     A screenshot of a two-page spread into two cropped, upscaled pages.
           A spread halves each page's resolution, which puts the staff-line
           spacing (interline) under the ~11 px Audiveris will trust.
+svg       An SVG page into a one-page PDF, still a drawing (vector.py reads
+          it). Lists each <use> that points at a symbol the file never
+          defines: drawn as nothing, as a browser draws it. An SVG
+          optimiser strips empty glyphs (spaces) and leaves such links.
 
 "Page-number order" sorts on the last number in each file name, so page_9
 comes before page_10.
@@ -142,6 +147,21 @@ def split_spread(spread: Path, out_dir: Path, upscale: int = 3, density: float =
     return written
 
 
+def svg_to_pdf(svg: Path, out: Path) -> list[str]:
+    """Convert; returns the ids that <use> links name but the file lacks."""
+    import xml.etree.ElementTree as ET
+    import pymupdf
+    root = ET.parse(svg).getroot()
+    ids = {el.get("id") for el in root.iter() if el.get("id")}
+    missing = sorted({(el.get("{http://www.w3.org/1999/xlink}href") or el.get("href") or "").lstrip("#")
+                      for el in root.iter() if el.tag.endswith("}use") or el.tag == "use"} - ids)
+    with pymupdf.open(svg) as doc:
+        data = doc.convert_to_pdf()
+    with pymupdf.open("pdf", data) as pdf:
+        pdf.save(out)
+    return missing
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -163,6 +183,9 @@ def main(argv: list[str]) -> int:
     s.add_argument("out_dir", type=Path)
     s.add_argument("--upscale", type=int, default=3)
     s.add_argument("--density", type=float, default=0.5)
+    v = sub.add_parser("svg")
+    v.add_argument("svg", type=Path)
+    v.add_argument("out", type=Path)
     args = parser.parse_args(argv)
 
     try:
@@ -173,6 +196,10 @@ def main(argv: list[str]) -> int:
                           args.out, args.dpi)
         elif args.verb == "rerender":
             print("\n".join(rerender(args.pdf, args.out, args.dpi, args.max_pixels)))
+        elif args.verb == "svg":
+            missing = svg_to_pdf(args.svg, args.out)
+            print(f"{args.out}" + (f"; links to symbols the SVG lacks, drawn as nothing: {', '.join(missing)}"
+                                   if missing else ""))
         else:
             for path in split_spread(args.spread, args.out_dir, args.upscale, args.density):
                 print(path)

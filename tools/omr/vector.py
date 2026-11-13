@@ -254,12 +254,20 @@ def has_smufl(pdfs: list[Path]) -> bool:
 def _join_segments(lines: list[tuple[float, float, float]]) -> list[tuple[float, float, float]]:
     """Horizontal lines at one height that meet end to end, as one line:
     some software draws a stave bar by bar."""
-    joined: list[tuple[float, float, float]] = []
-    for x0, x1, y in sorted(lines, key=lambda h: (round(h[2], 2), h[0])):
-        if joined and abs(joined[-1][2] - y) < 0.05 and -0.5 < x0 - joined[-1][1] < 0.5:
-            joined[-1] = (joined[-1][0], max(x1, joined[-1][1]), joined[-1][2])
+    rows: list[list[tuple[float, float, float]]] = []
+    for line in sorted(lines, key=lambda h: h[2]):                # heights within 0.05 are one row
+        if rows and line[2] - rows[-1][-1][2] < 0.05:
+            rows[-1].append(line)
         else:
-            joined.append((x0, x1, y))
+            rows.append([line])
+    joined: list[tuple[float, float, float]] = []
+    for row in rows:
+        start = len(joined)
+        for x0, x1, y in sorted(row):
+            if len(joined) > start and -0.5 < x0 - joined[-1][1] < 0.5:
+                joined[-1] = (joined[-1][0], max(x1, joined[-1][1]), joined[-1][2])
+            else:
+                joined.append((x0, x1, y))
     return joined
 
 
@@ -271,6 +279,9 @@ def _vertical_ends(page, touching: Counter, total: Counter) -> None:
     drawings = page.get_drawings()
     sides: dict[int, list] = defaultdict(list)
     shapes = [d["rect"] for d in drawings if d.get("fill") is not None]
+    # One path can hold a page's beams as rectangles or quads: each counts.
+    shapes += [item[1].rect if item[0] == "qu" else item[1] for d in drawings if d.get("fill") is not None
+               for item in d["items"] if item[0] in ("re", "qu")]
     shapes += [pymupdf.Rect(g.x0, g.y0, g.x1, g.y1) for g in smufl_glyphs(page)]
     for r in shapes:
         sides[int(r.x0)].append((r.x0, r))
@@ -309,8 +320,9 @@ def stem_width(doc) -> float:
     return width
 
 
-def read_page(page) -> Page:
-    """Everything this module finds on one pymupdf page."""
+def read_page(page, lines: int = 5) -> Page:
+    """Everything this module finds on one pymupdf page; `lines`, the lines
+    a stave has (6 for guitar tab)."""
     drawings = page.get_drawings()
     stem_max = stem_width(page.parent) if page.parent is not None else LINE_WIDTH_STEM_MAX
     horizontals, verticals, stems, ledgers = [], [], [], []
@@ -335,7 +347,7 @@ def read_page(page) -> Page:
                     verticals.append((p.x, y0, y1))
     horizontals = _join_segments(horizontals)
     ledgers = [h for h in horizontals if h[1] - h[0] <= 40]
-    staves = _staves([h for h in horizontals if h[1] - h[0] > 40])
+    staves = _staves([h for h in horizontals if h[1] - h[0] > 40], count=lines)
     bar_lines = []
     for stave in staves:
         xs = sorted(x for x, y0, y1 in verticals

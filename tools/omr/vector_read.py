@@ -93,29 +93,43 @@ class Curve:
     points at its two ends."""
     left: tuple[float, float]
     right: tuple[float, float]
+    steep: bool = False             # taller than a whole tie: half a tie cut off at a system's edge, or not one
 
     @property
     def width(self) -> float:
         return self.right[0] - self.left[0]
 
 
+def _subpaths(items: list) -> list[list]:
+    """A path's pieces, split where one doesn't start where the last ended:
+    one path can draw several ties."""
+    parts: list[list] = []
+    for item in items:
+        if parts and abs(item[1].x - parts[-1][-1][-1].x) < 0.01 and abs(item[1].y - parts[-1][-1][-1].y) < 0.01:
+            parts[-1].append(item)
+        else:
+            parts.append([item])
+    return parts
+
+
 def curves_on_page(pg) -> list[Curve]:
-    """Long, low filled paths, at least half their pieces curves: ties and slurs."""
+    """Long, low filled shapes, at least half their pieces curves: ties and
+    slurs, each subpath of a path on its own."""
     curves = []
     for d in pg.get_drawings():
-        if d.get("fill") is None:
+        if d.get("fill") is None or any(item[0] not in ("c", "l") for item in d["items"]):
             continue
-        items = d["items"]
-        kinds = [item[0] for item in items]
-        if kinds.count("c") < 2 or any(k not in ("c", "l") for k in kinds) or kinds.count("c") < len(kinds) * 0.5:
-            continue
-        r = d["rect"]
-        if r.width < 2.5 or r.height > r.width * 0.6:
-            continue
-        points = [p for item in items for p in item[1:]]
-        left = min(points, key=lambda p: p.x)
-        right = max(points, key=lambda p: p.x)
-        curves.append(Curve((left.x, left.y), (right.x, right.y)))
+        for items in _subpaths(d["items"]):
+            kinds = [item[0] for item in items]
+            if kinds.count("c") < 2 or kinds.count("c") < len(kinds) * 0.5:
+                continue
+            points = [p for item in items for p in item[1:]]
+            left = min(points, key=lambda p: p.x)
+            right = max(points, key=lambda p: p.x)
+            width, height = right.x - left.x, max(p.y for p in points) - min(p.y for p in points)
+            if width < 2.5 or height > width * 0.85:
+                continue
+            curves.append(Curve((left.x, left.y), (right.x, right.y), steep=height > width * 0.6))
     return curves
 
 
@@ -147,17 +161,17 @@ class Beam:
 
 
 def beams_on_page(pg) -> list[Beam]:
-    """Four-sided pieces with two vertical ends, from every filled path made
-    only of lines."""
+    """Four-sided pieces with two vertical ends, from every dark filled path
+    made only of lines (a light one is a background or a mask)."""
     beams = []
     for d in pg.get_drawings():
-        if d.get("fill") is None:
+        if d.get("fill") is None or min(d["fill"]) > 0.5:
             continue
         # A flat beam can be drawn as a rectangle (re) or a quad (qu).
         for item in d["items"]:
             if item[0] == "re":
                 r = item[1]
-                if r.width > 2 and 0.2 < r.height < 3:
+                if r.width > 2 and 0.2 < r.height <= BEAM_THICKEST:
                     beams.append(Beam(r.x0, r.x1, r.y0, r.y0, r.height))
             elif item[0] == "qu":
                 q = item[1]
@@ -168,11 +182,16 @@ def beams_on_page(pg) -> list[Beam]:
                     if len(left) == 2 and len(right) == 2:
                         beams.append(Beam(xs[0], xs[-1], min(p.y for p in left), min(p.y for p in right),
                                           abs(left[0].y - left[1].y)))
-        if any(item[0] != "l" for item in d["items"]):
-            continue
-        items = d["items"]
-        for start in range(0, len(items) - 3, 4):
-            quad = items[start:start + 4]
+        # A beam drawn as four lines: in runs of lines, which a path can mix
+        # with rectangles and curves.
+        runs: list[list] = [[]]
+        for item in d["items"]:
+            if item[0] == "l":
+                runs[-1].append(item)
+            elif runs[-1]:
+                runs.append([])
+        quads = [run[start:start + 4] for run in runs for start in range(0, len(run) - 3, 4)]
+        for quad in quads:
             points = [quad[0][1]] + [item[2] for item in quad]
             verticals = [(p, q) for p, q in zip(points, points[1:]) if abs(p.x - q.x) < 0.05 and abs(p.y - q.y) > 0.2]
             if len(verticals) != 2:
@@ -375,12 +394,15 @@ def _find_ties(heads: list[Head], elsewhere: list[Head], curves: list[Curve], ga
             # height, so not another voice's) makes the curve a slur.
             between = any(start.x + gap * 0.5 < h.x < end.x - gap * 0.5 and abs(h.y - start.y) < gap * 3.5
                           for h in everything)
-            if start.step == end.step and end.x > start.x and not between:
+            if start.step == end.step and end.x > start.x and not between and not curve.steep:
                 start.tie_start = end.tie_stop = True
             continue
         if curve.width >= gap * 6:
             continue
         found = start if start is not None else end
+        if curve.steep and not (start is not None and curve.right[0] > max(h.x for h in everything) or
+                                end is not None and curve.left[0] < min(h.x for h in everything)):
+            continue                                            # a cut-off tie runs past every note
         between = [h for h in everything if curve.left[0] - near < h.x < curve.right[0] + near
                    and abs(h.x - found.x) > gap * 0.5]                 # not its own chord
         if between:
