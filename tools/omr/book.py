@@ -252,11 +252,12 @@ def read_page_checked(pdf: Path, page: int, folder: Path, dpi: int | None, run, 
 
 def read_book(pdf: Path, folder: Path, name: str, dpi: int | None = None,
               run=audiveris.run, chunk_pages: int = CHUNK_PAGES,
-              printed: dict[int, int] | None = None) -> Book:
+              printed: dict[int, int] | None = None, first_bar: int | None = None) -> Book:
     """Read all of `pdf` in chunks into `folder`, then join them into
     `folder`/<name>.mxl. With `printed` ({page: bars printed on it}), each
-    page is read alone and checked (read_page_checked). Raises Interrupted
-    if Audiveris is killed."""
+    page is read alone and checked (read_page_checked); `first_bar`, the
+    first page's first printed bar number, numbers the bars. Raises
+    Interrupted if Audiveris is killed."""
     import pymupdf
     folder.mkdir(parents=True, exist_ok=True)
     with pymupdf.open(pdf) as doc:
@@ -284,7 +285,7 @@ def read_book(pdf: Path, folder: Path, name: str, dpi: int | None = None,
     if not mxls:
         return Book(None, lost, notes, log=log)
     out = folder / f"{name}.mxl"
-    join_scores(mxls, out)
+    join_scores(mxls, out, first_bar if 1 not in lost else None)
     return Book(out, lost, notes, log=log)
 
 
@@ -301,21 +302,24 @@ def _show(measure: score.ET.Element, shown: bool) -> None:
                                                       {"print-object": "yes" if shown else "no"}))
 
 
-def join_scores(paths: list[Path], out: Path) -> None:
+def join_scores(paths: list[Path], out: Path, first_bar: int | None = None) -> None:
     """One score from chunks read one after another: every chunk's parts,
     renumbered P1.. in order, each padded with empty bars, staves marked
     unprinted, where another chunk is playing; bars numbered on from the
-    chunk before."""
+    chunk before. With `first_bar` (the printed number of the first bar),
+    the first chunk is numbered from it too, not as Audiveris numbered it:
+    Audiveris calls a short first bar a pickup, bar 0, and every bar after
+    is one out."""
     roots = [score.load(p) for p in paths]
     joined = copy.deepcopy(roots[0])
     for child in [c for c in joined if c.tag in ("part-list", "part")]:
         joined.remove(child)
     numbers: list[list[str]] = []
-    last = 0
+    last = 0 if first_bar is None else first_bar - 1
     for k, root in enumerate(roots):
         first_part = root.find("part")
         own = [m.get("number") for m in first_part.findall("measure")] if first_part is not None else []
-        if k == 0:
+        if k == 0 and first_bar is None:
             numbers.append(own)
             digits = [int(n) for n in own if n.isdigit()]
             last = max(digits) if digits else len(own)
@@ -347,7 +351,9 @@ def join_scores(paths: list[Path], out: Path) -> None:
                 part.remove(measure)
             for measure, number in zip(measures, numbers[k]):
                 measure.set("number", number)
-            before = [score.ET.Element("measure", {"number": n}) for j in range(k) for n in numbers[j]]
+                if first_bar is not None and first_bar >= 1:
+                    measure.attrib.pop("implicit", None)            # a printed bar 1 is no pickup
+            before =[score.ET.Element("measure", {"number": n}) for j in range(k) for n in numbers[j]]
             after = [score.ET.Element("measure", {"number": n}) for j in range(k + 1, len(roots))
                      for n in numbers[j]]
             if before and measures:

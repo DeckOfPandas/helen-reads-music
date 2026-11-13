@@ -38,7 +38,8 @@ RESTS = {"rest-quarter": Fraction(1), "rest-eighth": Fraction(1, 2), "rest-16th"
 FLAGS = {"flag-8th-up": 1, "flag-8th-down": 1, "flag-16th-up": 2, "flag-16th-down": 2}
 MARKS = {"accent": "accent", "marcato": "strong", "tenuto": "tenuto", "dot-small": "staccato", "open": "open"}
 ACCIDENTALS = {"flat": -1, "sharp": 1, "natural": 0}
-FLAT_BULB = 0.7                     # a flat's note is this many spaces above the flat's foot
+BEAM_THICKEST = 8.0                 # points: half a space even on a stave drawn twice the usual size
+FLAT_BULB = 0.7                    # a flat's note is this many spaces above the flat's foot
 
 
 def accidental_y(sign: vector.Glyph, gap: float) -> float:
@@ -109,7 +110,7 @@ def curves_on_page(pg) -> list[Curve]:
         if kinds.count("c") < 2 or any(k not in ("c", "l") for k in kinds) or kinds.count("c") < len(kinds) * 0.5:
             continue
         r = d["rect"]
-        if r.width < 2.5 or r.height > r.width * 0.45:                 # a whole note is squat, a tie flat
+        if r.width < 2.5 or r.height > r.width * 0.6:
             continue
         points = [p for item in items for p in item[1:]]
         left = min(points, key=lambda p: p.x)
@@ -177,24 +178,48 @@ def beams_on_page(pg) -> list[Beam]:
             if len(verticals) != 2:
                 continue
             (a, b), (c, e) = sorted(verticals, key=lambda v: v[0].x)
-            if c.x - a.x < 2:
-                continue
+            if c.x - a.x < 2 or abs(a.y - b.y) > BEAM_THICKEST:
+                continue                                        # too short, or a background, not a beam
             beams.append(Beam(a.x, c.x, min(a.y, b.y), min(c.y, e.y), abs(a.y - b.y)))
     return beams
 
 
-def _attach_stem(head, stems: list[vector.Stem], gap: float) -> tuple[vector.Stem, str] | None:
-    """The stem a head hangs on, and its direction."""
+def _touches(stem: vector.Stem, head) -> bool:
+    return min(abs(stem.x - head.x1), abs(stem.x - head.x0)) < 0.8
+
+
+def _stem_direction(stem: vector.Stem, heads: list, gap: float) -> str | None:
+    """Up if noteheads sit at the stem's foot and none at its top, down the
+    other way round; None if heads sit at both ends or neither."""
+    at_top = any(_touches(stem, h) and abs(h.cy - stem.y0) < gap * 0.75 for h in heads)
+    at_foot = any(_touches(stem, h) and abs(h.cy - stem.y1) < gap * 0.75 for h in heads)
+    if at_foot != at_top:
+        return "up" if at_foot else "down"
+    return None
+
+
+def _attach_stem(head, stems: list[vector.Stem], gap: float, heads: list | None = None) -> tuple[vector.Stem, str] | None:
+    """The stem a head hangs on, and its direction. The direction is the
+    stem's own (_stem_direction, from `heads`): the end with no notehead
+    is its tip. A head in a chord of a second sits on the stem's far side,
+    so either edge may meet it. Where the stem's ends don't tell, a head
+    meets an up-stem with its right edge and a down-stem with its left."""
     best = None
     for stem in stems:
-        if not (stem.y0 - gap * 0.6 <= head.cy <= stem.y1 + gap * 0.6):
+        if not (stem.y0 - gap * 0.6 <= head.cy <= stem.y1 + gap * 0.6) or not _touches(stem, head):
             continue
-        if abs(stem.x - head.x1) < 0.8 and stem.y0 < head.cy - gap * 0.3:
-            candidate = (abs(stem.x - head.x1), stem, "up")
-        elif abs(stem.x - head.x0) < 0.8 and stem.y1 > head.cy + gap * 0.3:
-            candidate = (abs(stem.x - head.x0), stem, "down")
-        else:
+        direction = _stem_direction(stem, heads or [head], gap)
+        if direction is None:
+            if abs(stem.x - head.x1) < 0.8 and stem.y0 < head.cy - gap * 0.3:
+                direction = "up"
+            elif abs(stem.x - head.x0) < 0.8 and stem.y1 > head.cy + gap * 0.3:
+                direction = "down"
+            else:
+                continue
+        elif (direction == "up" and stem.y0 >= head.cy - gap * 0.3) or \
+                (direction == "down" and stem.y1 <= head.cy + gap * 0.3):
             continue
+        candidate = (min(abs(stem.x - head.x1), abs(stem.x - head.x0)), stem, direction)
         if best is None or candidate[0] < best[0]:
             best = candidate
     return (best[1], best[2]) if best else None
@@ -226,7 +251,7 @@ def read_bar(page: vector.Page, beams: list[Beam], stave_index: int, bar: int,
         head = Head(round(stave.step(glyph.cy)), HEADS[glyph.name], glyph.cx, glyph.cy, left=glyph.x0)
         if id(glyph) in owners:
             head.accidental = ACCIDENTALS[owners[id(glyph)].name]
-        attached = _attach_stem(glyph, stems, gap) if head.kind in ("black", "half", "x") else None
+        attached = _attach_stem(glyph, stems, gap, heads) if head.kind in ("black", "half", "x") else None
         if attached is None:
             length = {"whole": Fraction(4), "slash": Fraction(1)}.get(head.kind)
             if length is None:

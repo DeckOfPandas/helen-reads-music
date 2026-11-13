@@ -106,11 +106,14 @@ class Engraver:
         self.shape.draw_line((x0, y0), (x1, y1))
         self.shape.finish(color=BLACK, width=width, fill=None, closePath=False)
 
-    def stave(self, top: float, bar_lines: list[float]) -> Stave:
-        """Five lines from the first bar line to the last, and the bar lines."""
+    def stave(self, top: float, bar_lines: list[float], by_bar: bool = False) -> Stave:
+        """Five lines from the first bar line to the last, and the bar lines;
+        `by_bar`, each bar's lines drawn on their own, end to end."""
         left, right = bar_lines[0], bar_lines[-1]
+        spans = list(zip(bar_lines, bar_lines[1:])) if by_bar else [(left, right)]
         for k in range(5):
-            self._line(left, top + k * GAP, right, top + k * GAP, STAVE_WIDTH)
+            for x0, x1 in spans:
+                self._line(x0, top + k * GAP, x1, top + k * GAP, STAVE_WIDTH)
         stave = Stave(top, left, right, bar_lines)
         for x in bar_lines:
             self._line(x, stave.top, x, stave.bottom, self.bar_width)

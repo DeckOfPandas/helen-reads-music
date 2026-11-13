@@ -627,7 +627,7 @@ def check(root: ET.Element, piece: Path, pdfs: list[Path], fix: bool = True,
     import pymupdf
     skip = skip or set()
     catalogue = vector.load_catalogue(piece)
-    if not catalogue:
+    if not catalogue and not vector.has_smufl(pdfs):
         return [], ["drawing check: no glyphs.json for this piece (vector.py survey makes one); skipped"]
     slots = _read_counts(root)
     numbers = [m.get("number") for m in root.find("part").findall("measure")]
@@ -705,6 +705,11 @@ def check(root: ET.Element, piece: Path, pdfs: list[Path], fix: bool = True,
                 if drums:
                     if not voices or (slot.part, number) in skip:
                         continue
+                    if not vector_read.adds_up(voices, expected) and _pad(voices, expected) is None:
+                        # Some engravers write the kit as one voice, stems either way.
+                        one = vector_read.read_bar(page, beams, stave, k, expected, curves=curves)
+                        if one and vector_read.adds_up(one, expected):
+                            voices = one
                     if vector_read.adds_up(voices, expected) or _pad(voices, expected) is not None:
                         drum_voices = _pad(voices, expected)
                         if drum_voices is None:

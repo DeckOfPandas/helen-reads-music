@@ -45,7 +45,9 @@ last printed bar number, `{"12": [48, 51]}`, read off the pages), each page
 is read on its own, and a page whose bars don't match is read again at 330,
 360, 400 and 300 DPI. One that still doesn't match is put right by
 `pagefix.py`: a double bar split, an empty bar dropped, systems folded back
-into one. Each page's outcome is in `omr/chunks/<read>/progress.txt`.
+into one. Each page's outcome is in `omr/chunks/<read>/progress.txt`. The
+bars are numbered from the first page's first printed bar: Audiveris calls a
+short first bar a pickup, bar 0, and puts every bar after one out.
 
 ## Reading the PDF's own drawing
 
@@ -86,7 +88,14 @@ PDF has no drawing, and no `glyphs.json` means no check.
 A part printed several systems to a page (a piano part on grand staves)
 is checked system by system: a page with more staves than the score has is
 split into systems where bar lines join staves. Every page of every PDF
-counts, in order, so a five-page PDF is pages 1-5.
+counts, in order, so a five-page PDF is pages 1-5. A stave drawn bar by bar
+is joined into one.
+
+Some software (MuseScore 4) writes the symbols as characters of a SMuFL
+music font (Leland, Bravura) rather than as shapes. Their codepoints name
+them, so they need no naming in `glyphs.json`, and `survey` shows only the
+shapes left. A drum kit written as one voice, stems either way, is read as
+one voice when splitting it by stem direction doesn't add up.
 
 To check a bar by eye, `vector.py picture library/<piece> <page> <stave>
 <first bar> <last bar>` writes a PNG of it to `omr/views/bars/`.

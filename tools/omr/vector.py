@@ -50,13 +50,13 @@ _STEM_WIDTHS: dict[tuple[str, int], float] = {}     # (pdf path, mtime) -> stem_
 
 @dataclass
 class Stave:
-    lines: list[float]               # y of the five lines, top first
+    lines: list[float]               # y of the five lines (six for tab), top first
     left: float
     right: float
 
     @property
     def gap(self) -> float:
-        return (self.lines[-1] - self.lines[0]) / 4
+        return (self.lines[-1] - self.lines[0]) / (len(self.lines) - 1)
 
     @property
     def top(self) -> float:
@@ -155,8 +155,9 @@ def fingerprint(drawing: dict) -> str:
     return "|".join(parts)
 
 
-def _staves(horizontals: list[tuple[float, float, float]]) -> list[Stave]:
-    """Groups of five long horizontals, evenly spaced, sharing their x extent."""
+def _staves(horizontals: list[tuple[float, float, float]], count: int = 5) -> list[Stave]:
+    """Groups of `count` long horizontals (five; six for guitar tab), evenly
+    spaced, sharing their x extent."""
     rows = sorted(horizontals, key=lambda h: (round(h[0]), h[2]))
     by_extent: dict[tuple[int, int], list[float]] = defaultdict(list)
     for x0, x1, y in rows:
@@ -165,27 +166,115 @@ def _staves(horizontals: list[tuple[float, float, float]]) -> list[Stave]:
     for (x0, x1), ys in by_extent.items():
         ys = sorted(set(round(y, 2) for y in ys))
         i = 0
-        while i + 4 < len(ys):
-            group = ys[i:i + 5]
+        while i + count - 1 < len(ys):
+            group = ys[i:i + count]
             gaps = [b - a for a, b in zip(group, group[1:])]
-            if max(gaps) - min(gaps) < 0.15 and 1.5 < gaps[0] < 12:
+            # One more line at the same spacing, either side, makes another kind
+            # of stave (five of a tab's six lines are not a stave).
+            beyond = i + count < len(ys) and abs(ys[i + count] - group[-1] - gaps[0]) < 0.15
+            before = i > 0 and abs(group[0] - ys[i - 1] - gaps[0]) < 0.15
+            if max(gaps) - min(gaps) < 0.15 and 1.5 < gaps[0] < 12 and not beyond and not before:
                 staves.append(Stave(group, float(x0), float(x1)))
-                i += 5
+                i += count
             else:
                 i += 1
     return sorted(staves, key=lambda s: s.top)
 
 
+# --- music drawn as text --------------------------------------------------------
+# MuseScore 4 and other software write symbols as characters of a SMuFL font
+# (Leland, Bravura): the codepoint names the symbol. SMuFL fixes the em at
+# four stave spaces and each glyph's place against its origin; the boxes
+# here are the glyphs' ink in stave spaces from the origin, y up (Bravura's;
+# other SMuFL fonts differ by less than the reader's slack).
+SMUFL: dict[int, tuple[str, tuple[float, float, float, float]]] = {
+    0xE0A2: ("notehead-whole", (0, -0.5, 1.69, 0.5)),
+    0xE0A3: ("notehead-half", (0, -0.5, 1.18, 0.5)),
+    0xE0A4: ("notehead-black", (0, -0.5, 1.18, 0.5)),
+    0xE0A9: ("notehead-x", (0, -0.5, 1.16, 0.5)),
+    0xE101: ("notehead-slash", (0, -1.0, 2.1, 1.0)),
+    0xE1E7: ("dot", (0, -0.2, 0.4, 0.2)),
+    0xE4E3: ("rest-whole", (0, -0.5, 1.13, 0)),          # hangs from the line at its origin
+    0xE4E4: ("rest-whole", (0, 0, 1.13, 0.5)),           # a half rest: sits on it
+    0xE4E5: ("rest-quarter", (0, -1.5, 1.08, 1.5)),
+    0xE4E6: ("rest-eighth", (0, -1.0, 1.0, 0.7)),
+    0xE4E7: ("rest-16th", (0, -2.0, 1.28, 0.7)),
+    0xE240: ("flag-8th-up", (0, -3.24, 1.06, 0)),
+    0xE241: ("flag-8th-down", (0, 0, 1.12, 3.24)),
+    0xE242: ("flag-16th-up", (0, -3.24, 1.16, 0)),
+    0xE243: ("flag-16th-down", (0, 0, 1.16, 3.24)),
+    0xE260: ("flat", (0, -0.7, 0.9, 1.75)),
+    0xE261: ("natural", (0, -1.34, 0.67, 1.34)),
+    0xE262: ("sharp", (0, -1.4, 1.0, 1.4)),
+    0xE050: ("clef-treble", (0, -2.6, 2.68, 4.4)),
+    0xE062: ("clef-bass", (0, -2.5, 2.7, 1.0)),
+    0xE05C: ("clef-alto", (0, -2.0, 2.8, 2.0)),
+    0xE069: ("clef-percussion", (0, -1.0, 1.0, 1.0)),
+    0xE4A0: ("accent", (0, 0, 1.35, 0.7)),
+    0xE4A1: ("accent", (0, -0.7, 1.35, 0)),
+    0xE4A2: ("dot-small", (0, 0, 0.4, 0.4)),
+    0xE4A3: ("dot-small", (0, -0.4, 0.4, 0)),
+    0xE4A4: ("tenuto", (0, 0, 1.35, 0.1)),
+    0xE4A5: ("tenuto", (0, -0.1, 1.35, 0)),
+    0xE4AC: ("marcato", (0, 0, 1.0, 1.1)),
+    0xE4AD: ("marcato", (0, -1.1, 1.0, 0)),
+}
+
+
+def smufl_glyphs(page) -> list[Glyph]:
+    """Every character of a private-use codepoint (SMuFL's range) on the
+    page, as a glyph keyed "smufl:<hex>" and named from SMUFL ("other" for
+    the rest), its box from SMUFL or else the text's own."""
+    glyphs = []
+    for span in page.get_texttrace():
+        space = span["size"] / 4
+        for code, _, origin, bbox in span["chars"]:
+            if not 0xE000 <= code <= 0xF8FF:
+                continue
+            name, box = SMUFL.get(code, ("other", None))
+            if box is None:
+                x0, y0, x1, y1 = bbox
+            else:
+                x0, y0 = origin[0] + box[0] * space, origin[1] - box[3] * space
+                x1, y1 = origin[0] + box[2] * space, origin[1] - box[1] * space
+            glyphs.append(Glyph(f"smufl:{code:04X}", x0, y0, x1, y1, name))
+    return glyphs
+
+
+def has_smufl(pdfs: list[Path]) -> bool:
+    """Whether any page draws music as SMuFL characters, which name themselves."""
+    import pymupdf
+    for pdf in pdfs:
+        with pymupdf.open(pdf) as doc:
+            if any(smufl_glyphs(page) for page in doc):
+                return True
+    return False
+
+
+def _join_segments(lines: list[tuple[float, float, float]]) -> list[tuple[float, float, float]]:
+    """Horizontal lines at one height that meet end to end, as one line:
+    some software draws a stave bar by bar."""
+    joined: list[tuple[float, float, float]] = []
+    for x0, x1, y in sorted(lines, key=lambda h: (round(h[2], 2), h[0])):
+        if joined and abs(joined[-1][2] - y) < 0.05 and -0.5 < x0 - joined[-1][1] < 0.5:
+            joined[-1] = (joined[-1][0], max(x1, joined[-1][1]), joined[-1][2])
+        else:
+            joined.append((x0, x1, y))
+    return joined
+
+
 def _vertical_ends(page, touching: Counter, total: Counter) -> None:
     """Per vertical stroke width, how many strokes there are, and how many
-    end against the side of a filled shape (a notehead or a beam)."""
+    end against the side of a filled shape or a music character (a
+    notehead or a beam)."""
+    import pymupdf
     drawings = page.get_drawings()
     sides: dict[int, list] = defaultdict(list)
-    for d in drawings:
-        if d.get("fill") is not None:
-            r = d["rect"]
-            sides[int(r.x0)].append((r.x0, r))
-            sides[int(r.x1)].append((r.x1, r))
+    shapes = [d["rect"] for d in drawings if d.get("fill") is not None]
+    shapes += [pymupdf.Rect(g.x0, g.y0, g.x1, g.y1) for g in smufl_glyphs(page)]
+    for r in shapes:
+        sides[int(r.x0)].append((r.x0, r))
+        sides[int(r.x1)].append((r.x1, r))
     for d in drawings:
         if d.get("fill") is not None:
             continue
@@ -236,18 +325,17 @@ def read_page(page) -> Page:
                 continue
             p, q = item[1], item[2]
             if abs(p.y - q.y) < 0.05:
-                length = abs(p.x - q.x)
-                if length > 40:
+                if abs(p.x - q.x) > 3:
                     horizontals.append((min(p.x, q.x), max(p.x, q.x), p.y))
-                elif length > 3:
-                    ledgers.append((min(p.x, q.x), max(p.x, q.x), p.y))
             elif abs(p.x - q.x) < 0.05 and abs(p.y - q.y) > 3:
                 y0, y1 = min(p.y, q.y), max(p.y, q.y)
                 if width <= stem_max:
                     stems.append(Stem(p.x, y0, y1))
                 else:
                     verticals.append((p.x, y0, y1))
-    staves = _staves(horizontals)
+    horizontals = _join_segments(horizontals)
+    ledgers = [h for h in horizontals if h[1] - h[0] <= 40]
+    staves = _staves([h for h in horizontals if h[1] - h[0] > 40])
     bar_lines = []
     for stave in staves:
         xs = sorted(x for x, y0, y1 in verticals
@@ -261,7 +349,7 @@ def read_page(page) -> Page:
         if merged and merged[0] - stave.left > stave.gap * 2:
             merged.insert(0, stave.left)                          # the system's opening line, if not drawn here
         bar_lines.append(merged)
-    glyphs = []
+    glyphs = smufl_glyphs(page)
     for d in filled:
         r = d["rect"]
         glyphs.append(Glyph(fingerprint(d), r.x0, r.y0, r.x1, r.y1))
@@ -305,8 +393,10 @@ def load_catalogue(piece: Path) -> dict[str, str]:
 
 
 def name_glyphs(page: Page, catalogue: dict[str, str]) -> None:
+    """Names from the catalogue; a SMuFL character not in it keeps its own."""
     for glyph in page.glyphs:
-        glyph.name = catalogue.get(glyph.key, "other")
+        own = SMUFL.get(int(glyph.key[6:], 16), ("other",))[0] if glyph.key.startswith("smufl:") else "other"
+        glyph.name = catalogue.get(glyph.key, own)
     _place_by_ledgers(page)
 
 
@@ -417,7 +507,10 @@ def write_draft(piece: Path, clusters: dict, minimum: int = 3) -> Path:
     for key, entry in sorted(clusters.items(), key=lambda kv: -kv[1]["count"]):
         if entry["count"] < minimum and key not in existing:
             continue
-        name = existing.get(key) or guess_name(entry["width"], entry["height"], entry["kinds"], entry["gap"])
+        if key.startswith("smufl:"):
+            name = existing.get(key) or SMUFL.get(int(key[6:], 16), ("other",))[0]
+        else:
+            name = existing.get(key) or guess_name(entry["width"], entry["height"], entry["kinds"], entry["gap"])
         glyphs[key] = {"name": name, "count": entry["count"], "size": [entry["width"], entry["height"]],
                        "example": entry["example"]}
     path = catalogue_path(piece)

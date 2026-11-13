@@ -217,6 +217,43 @@ def test_stacked_flats_in_a_chord_go_to_their_own_notes(tmp_path):
     assert {h.step: h.accidental for h in chord.heads} == {0: -1, 2: None, 4: -1, 6: -1}
 
 
+def test_a_page_background_is_not_a_beam(tmp_path):
+    # Some software fills the page white with a four-line path first.
+    e = Engraver()
+    e.shape.draw_polyline([(0, 0), (e.width, 0), (e.width, e.height), (0, e.height), (0, 0)])
+    e.shape.finish(color=None, fill=(1, 1, 1), closePath=True)
+    stave = e.stave(100.0, [50.0, 130.0])
+    for x in (60.0, 75.0, 90.0, 105.0):
+        e.note(stave, x, 5, stem="down")
+    assert [ev.length for ev in read_one_bar(e, tmp_path)["single"]] == [1, 1, 1, 1]
+
+
+def test_a_second_on_a_down_stem_is_one_chord(tmp_path):
+    # C5 and D5 on one down-stem: D5 on the stem's right, C5 displaced to its
+    # left, the stem starting at D5, just above C5's centre. Four of them.
+    e = Engraver()
+    stave = e.stave(100.0, [50.0, 130.0])
+    for x in (60.0, 75.0, 90.0, 105.0):
+        e.head(stave, x - 3.5, 5)
+        top = e.head(stave, x, 6)
+        e.stem(x, top.y0 + 1.5, stave.y(6) + GAP * 3.5)
+    events = read_one_bar(e, tmp_path)["single"]
+    assert [(ev.length, ev.stem, sorted(h.step for h in ev.heads)) for ev in events] == [(1, "down", [5, 6])] * 4
+
+
+def test_a_chord_spanning_its_up_stem_is_read_up(tmp_path):
+    # Kick F4 and hi-hat G5 on one up-stem: the stem runs further below the
+    # hi-hat than above it, but its foot is at the kick, so it goes up.
+    e = Engraver()
+    stave = e.stave(100.0, [50.0, 130.0])
+    for x in (60.0, 75.0, 90.0, 105.0):
+        kick = e.head(stave, x, 1)
+        e.head(stave, x, 9, "x")
+        e.stem(kick.x1, stave.y(9) - GAP * 2.5, stave.y(1))
+    events = read_one_bar(e, tmp_path)["single"]
+    assert [(ev.length, ev.stem, sorted(h.step for h in ev.heads)) for ev in events] == [(1, "up", [1, 9])] * 4
+
+
 def test_a_double_dot_adds_three_quarters(tmp_path):
     # | minim, double-dotted crotchet, quaver |
     e = Engraver()
@@ -263,13 +300,62 @@ def test_a_tie_with_blunt_ends_is_a_tie(tmp_path):
     assert first_note.heads[0].tie_start and second_note.heads[0].tie_stop
 
 
-def test_a_squat_whole_note_is_not_a_curve(tmp_path):
+def test_a_short_squat_tie_is_a_tie(tmp_path):
+    # Two crotchets close together: their tie is 5 points wide, 2.8 high.
     e = Engraver()
-    e.shape.draw_oval(pymupdf.Rect(60.0, 100.0, 68.4, 105.0))   # 1.7 spaces by 1
-    e.shape.finish(color=None, fill=(0, 0, 0))
+    stave = e.stave(100.0, [50.0, 130.0])
+    first, _ = e.note(stave, 60.0, 5, stem="down")
+    second, _ = e.note(stave, 70.5, 5, stem="down")
+    e.shape.draw_bezier((first.x1 + 1.0, first.y0), (first.x1 + 2.0, first.y0 - 2.8),
+                        (second.x0 - 2.0, first.y0 - 2.8), (second.x0 - 1.0, first.y0))
+    e.shape.draw_bezier((second.x0 - 1.0, first.y0), (second.x0 - 2.0, first.y0 - 2.0),
+                        (first.x1 + 2.0, first.y0 - 2.0), (first.x1 + 1.0, first.y0))
+    e.shape.finish(color=None, fill=(0, 0, 0), closePath=True)
+    e.note(stave, 90.0, 5, kind="half", stem="down")
+    one, two, _ = read_one_bar(e, tmp_path)["single"]
+    assert one.heads[0].tie_start and two.heads[0].tie_stop
+
+
+def test_a_stave_drawn_bar_by_bar_is_one_stave(tmp_path):
+    e = Engraver()
+    e.stave(100.0, BARS, by_bar=True)
     pdf = e.save(tmp_path / "page.pdf")
     with pymupdf.open(pdf) as doc:
-        assert vector_read.curves_on_page(doc[0]) == []
+        drawn = vector.read_page(doc[0])
+    assert len(drawn.staves) == 1 and drawn.bar_count(0) == 3
+
+
+class WithMusicText:
+    """A real page, plus music written as SMuFL characters: (codepoint, x,
+    y of its origin). Test fonts have no SMuFL glyphs, so the characters
+    are given as the page's text trace."""
+
+    def __init__(self, page, chars: list[tuple[int, float, float]]):
+        self._page, self._chars = page, chars
+
+    def __getattr__(self, name):
+        return getattr(self._page, name)
+
+    def get_texttrace(self):
+        return [{"size": 4 * GAP, "chars": [(code, 1, (x, y), (x, y - 2 * GAP, x + 3.5, y + 2 * GAP))
+                                            for code, x, y in self._chars]}]
+
+
+def test_music_written_in_a_smufl_font_is_read(tmp_path):
+    # | x-head crotchet G5, black crotchets C5 F4, a half rest |
+    e = Engraver()
+    stave = e.stave(100.0, [50.0, 130.0])
+    heads = [(0xE0A9, 60.0, 9, "up"), (0xE0A4, 75.0, 5, "up"), (0xE0A4, 90.0, 1, "up")]
+    for _, x, step, _ in heads:
+        e.stem(x + 3.54, stave.y(step) - GAP * 3.5, stave.y(step))
+    pdf = e.save(tmp_path / "page.pdf")
+    chars = [(code, x, stave.y(step)) for code, x, step, _ in heads] + [(0xE4E4, 105.0, stave.y(4))]
+    with pymupdf.open(pdf) as doc:
+        drawn = vector.read_page(WithMusicText(doc[0], chars))
+    vector.name_glyphs(drawn, {})
+    events = vector_read.read_bar(drawn, [], 0, 0, Fraction(4))["single"]
+    assert [(e.length, [(h.kind, h.step) for h in e.heads]) for e in events] == [
+        (1, [("x", 9)]), (1, [("black", 5)]), (1, [("black", 1)]), (2, [])]
 
 
 def test_reads_whole_and_half_rests_by_where_they_sit(page):
@@ -354,6 +440,33 @@ def test_drums_are_written_from_the_drawing(checked):
     assert len(hats) == 8 and {n.findtext("notehead") for n in hats} == {"x"}
     assert [n.findtext("unpitched/display-step") + n.findtext("unpitched/display-octave") for n in kicks] == \
         ["F4", "F4"]
+
+
+def test_a_kit_written_as_one_voice_with_stems_both_ways(tmp_path):
+    # | crotchet rest, hi-hat crotchet stem up, crotchet rest, two quavers of
+    # hi-hat and kick on one down-stem | as some engravers write a kit.
+    e = Engraver()
+    drums = e.stave(220.0, [50.0, 130.0])
+    e.clef(drums, "percussion")
+    e.rest(drums, 60.0, "quarter")
+    e.note(drums, 75.0, 9, kind="x", stem="up")
+    e.rest(drums, 90.0, "quarter")
+    for x in (102.0, 114.0):
+        e.head(drums, x, 9, "x")
+        e.head(drums, x, 1)
+        e.stem(x, drums.y(9), drums.y(1) + GAP * 3.5)
+    e.beam(102.0, 114.0, drums.y(1) + GAP * 3.5 - 1.5)
+    piece = tmp_path / "piece"
+    piece.mkdir()
+    pdf = e.save(piece / "page.pdf")
+    e.catalogue(pdf, piece)
+    drum_attributes = ("<attributes><divisions>4</divisions><key><fifths>0</fifths></key><time><beats>4</beats>"
+                       "<beat-type>4</beat-type></time><clef><sign>percussion</sign></clef></attributes>")
+    root = ET.fromstring(make_score([("P1", "Drum Set", f'<part id="P1">{drum_bar(1, drum_attributes)}</part>')]))
+    _, report = drawing_check.check(root, piece, [pdf])
+    assert "1 drum bar(s) written from the drawing" in report[0]
+    notes = [n for n in notes_of(root, "P1", "1") if n.find("rest") is None]
+    assert sorted(n.findtext("notehead") or "normal" for n in notes) == ["normal", "normal", "x", "x", "x"]
 
 
 def test_a_drum_voice_without_rests_is_padded_invisibly(checked):

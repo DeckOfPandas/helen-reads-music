@@ -169,6 +169,17 @@ def test_a_page_with_the_wrong_bars_is_read_at_other_dpis(tmp_path):
     assert again.calls == []                       # every page was finished
 
 
+def test_bars_take_their_printed_numbers_not_a_pickups(tmp_path):
+    # Audiveris read the first bar as a pickup, numbered 0, its bars one out.
+    first = bar([("r", 3)], 0, attributes(), implicit=True)
+    rest = [bar(four_crotchets(), n) for n in (1, 2)]
+    mxl = write_mxl(tmp_path / "chunk.mxl", make_score([("P1", "Dr.", part("P1", [first, *rest]))]))
+    book.join_scores([mxl], tmp_path / "joined.mxl", first_bar=1)
+    measures = score.load(tmp_path / "joined.mxl").find("part").findall("measure")
+    assert [m.get("number") for m in measures] == ["1", "2", "3"]
+    assert measures[0].get("implicit") is None
+
+
 def test_crashed_sheets_and_fix_dpi():
     log = ("WARN  [x-fixed#39]                      Book 2044 | Error processing stub java.lang.Runtime\n"
            "INFO  [x-fixed#40]                KeyBuilder 1380 | Staff#9 key replication failed.\n")
