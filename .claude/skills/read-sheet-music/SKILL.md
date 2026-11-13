@@ -160,9 +160,10 @@ For each bar still wrong, decide where the fix belongs:
   diff lists on the page. A fix that helps one bar and quietly breaks three
   others is common.
 - **Only this piece, and no tool could read it:** a hand patch in
-  `merge.json` (`"patches"`, syntax in `python3 tools/omr/repair.py
-  --help`). Examples: a tuplet, a grace note, a word Audiveris never read.
-  Give each patch a `"_page"` note saying what is printed. Patch only bars
+  `merge.json` (`"patches"`, syntax in the docstring of `apply_patches` in
+  `tools/omr/repair.py`). Examples: a tuplet, a grace note, a word Audiveris
+  never read. Give each patch a `"_page"` note saying what is printed; a bar
+  with two voices to patch takes a list, one patch a voice. Patch only bars
   you have looked at.
 
 Things the tools cannot do yet:
