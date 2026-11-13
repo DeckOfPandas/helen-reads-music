@@ -45,7 +45,9 @@ last printed bar number, `{"12": [48, 51]}`, read off the pages), each page
 is read on its own, and a page whose bars don't match is read again at 330,
 360, 400 and 300 DPI. One that still doesn't match is put right by
 `pagefix.py`: a double bar split, an empty bar dropped, systems folded back
-into one. Each page's outcome is in `omr/chunks/<read>/progress.txt`.
+into one. Each page's outcome is in `omr/chunks/<read>/progress.txt`. The
+bars are numbered from the first page's first printed bar: Audiveris calls a
+short first bar a pickup, bar 0, and puts every bar after one out.
 
 ## Reading the PDF's own drawing
 
@@ -70,21 +72,97 @@ reading adds up and differs from the score, it wins:
 - an accent, marcato, tenuto or staccato goes to the nearest notehead, even
   one on the next stave;
 - rests missing from an otherwise right bar are put back;
-- ties are set as drawn;
+- ties are set as drawn (across a system break too, a chord's ties each);
 - a fingered tremolo (two minims a beam's strokes apart, together lasting
   one) is written as one;
 - a drum bar is written from the drawing, voices as drawn, a voice the page
-  leaves without rests padded with invisible ones.
+  leaves without rests padded with invisible ones where its gaps are;
+- an octave clef's small 8 is drawn on every system and a read can miss it
+  on some: the clef gets the 8 the page shows, and the notes read under the
+  wrong clef move by the octave.
 
 A bar whose drawing does not add up (tuplets, grace notes) is reported, not
-changed. Text is drawn as shapes too, and not read: lyrics are what
+changed. Nor is a drum bar holding grace notes (flams): the drawing reads
+none, so it is compared and reported, never rewritten. Text is drawn as shapes too, and not read: lyrics are what
 Audiveris read. Bars patched by hand are left alone; after the patches they
-are checked against the drawing, and only their ties are corrected. A
-scanned PDF has no drawing, and no `glyphs.json` means no check.
+are checked against the drawing, which only adds ties it sees: a tie can
+hide from it behind another voice's notes, so it removes none. A scanned
+PDF has no drawing, and no `glyphs.json` means no check.
+
+A part printed several systems to a page (a piano part on grand staves)
+is checked system by system: a page with more staves than the score has is
+split into systems where bar lines join staves. Every page of every PDF
+counts, in order, so a five-page PDF is pages 1-5. A stave drawn bar by bar
+is joined into one.
+
+Some software (MuseScore 4) writes the symbols as characters of a SMuFL
+music font (Leland, Bravura) rather than as shapes. Their codepoints name
+them, so they need no naming in `glyphs.json`, and `survey` shows only the
+shapes left. A drum kit written as one voice, stems either way, is read as
+one voice when splitting it by stem direction doesn't add up.
+
+A score printed from a web browser (Skia in the PDF's producer) outlines a
+whole page's symbols in a few filled paths. On such a page, where a path
+holds several outlines and spans more than a stave both ways, each outline
+(with the holes inside it) is a symbol of its own. Its fingerprint then
+varies by rounding a little from place to place: in `glyphs.json`, name
+the commonest of each shape and check the bars the report lists. Grace
+noteheads are smaller than ordinary ones: leave them `other`.
+
+Octave clefs (guitars, tenor voice, bass guitar) have their small 8 below.
+Where it is part of the clef's shape, name the shape `clef-treble-8vb` or
+`clef-bass-8vb`; where it is a shape of its own, name it `clef-8`. The
+pitches are then written as MusicXML writes them under an octave clef,
+sounding an octave below the plain clef's, so such a part needs no `8vb`
+in `"transpose"`.
 
 To check a bar by eye, `vector.py picture library/<piece> <page> <stave>
 <first bar> <last bar>` writes a PNG of it to `omr/views/bars/`.
 `merge-report.txt` says which stave is which part on each page.
+
+## Guitar tablature
+
+Audiveris does not read tab. A tab part exported from notation software is
+a drawing like any other, and `tab.py` reads it alone, with no Audiveris
+pass:
+
+    python3 tools/omr/vector.py survey library/<piece>
+    python3 tools/omr/tab.py library/<piece> [--tuning E2,A2,D3,G3,B3,E4] [--keys 1:6,9:-4]
+
+Name the digits `fret-0` to `fret-9`, time-signature figures `time-3`,
+`time-4` (and so on), and the rests, flags and dots, in `glyphs.json`. The
+white masks behind fret numbers stay `other`. The reader takes six-line
+staves, each fret number's string from its line, and the rhythm from the
+stems below: a full stem is a crotchet, halved by each beam or flag at its
+foot; a short stem is a minim; no stem is a semibreve; dots follow a stem,
+its flag, or a rest. Ties join the same fret on the same string, across
+system breaks too. It writes `omr/<piece>-merged.musicxml`: a guitar stave
+(treble clef an octave down) whose notes carry `<string>` and `<fret>`, so
+notation software can show tab as well. Tab has no key signature, so each
+run of bars takes the key needing the fewest accidentals (`--keys` sets
+them instead); `omr/tab-report.txt` names the keys and every bar that
+doesn't add up. Tuplets, grace notes, bends and slides are not read.
+
+An SVG page becomes a PDF with `pages.py svg <page.svg> <out.pdf>`, still a
+drawing.
+
+## Percussion from a poor scan, by eye
+
+On a poor scan (stave spaces of 5 px or less) Audiveris reads almost
+nothing of a drum or percussion stave, and there is no drawing to check it
+against. When only those parts are wanted, transcribe them by eye into
+`library/<piece>/transcription.json` and build the score from that alone:
+
+    python3 tools/omr/transcribed.py library/<piece>/transcription.json library/<piece>/omr/<piece>-<who>.musicxml
+
+Each part has a `kit` (its instruments' names, each with a stave position
+and General MIDI drum sound), its `grooves`, its `bars` (a groove, or
+voices in the `drum_grooves` syntax with the kit's names) and its `marks`.
+`pitched` and `clef` cover a percussionist who turns to timpani or
+xylophone. `transcribed.py --help` has the format. The sound follows the
+name, so a cowbell and a hi-hat drawn on one line still sound apart. It
+refuses a bar that doesn't add up, naming it, and runs `score.py check`
+on what it writes.
 
 ## Doublings
 
@@ -126,7 +204,7 @@ call:
 | `"transpose": {"Clarinet in Bb": "Bb"}` | Marks transposing instruments (Bb, A, F, Eb, 8va, 8vb) and gives them their written key |
 | `"octave_clefs": false` | The score has no octave clefs: undoes treble clefs Audiveris read as "8 below" |
 | `"key_changes": {"125": 0}` | A key change Audiveris read but failed to export: writes it into the parts that lack it and respells the notes the old key altered |
-| `"patches": {"Oboe": {"121": "1/2 1/2 +r:1/2 ..."}}` | Hand corrections to single bars, for what no tool reads (a tuplet, a grace note, a word Audiveris missed), applied last: edit the existing notes (lengths, re-pitch, insert, delete) so lyrics and marks survive, or replace a voice; fingered tremolos as `F4+Bb4/D5:2`; see `repair.py --help` |
+| `"patches": {"Oboe": {"121": "1/2 1/2 +r:1/2 ..."}}` | Hand corrections to single bars, for what no tool reads (a tuplet, a grace note, a word Audiveris missed), applied last: edit the existing notes (lengths, re-pitch, insert, delete) so lyrics and marks survive, or replace a voice; a list of patches for a bar patches several voices; fingered tremolos as `F4+Bb4/D5:2`; see `repair.py --help` |
 | `"vocal_parts": ["Voice"]` | Parts whose lyrics are lyrics; elsewhere dynamics, accents and instructions Audiveris read as lyrics become marks again (the default is just "Voice") |
 | `"drum_key": {"F5 x": 51}` | Extra drum sounds by stave position and notehead, as General MIDI numbers (named as General MIDI names them); every drum note gets its instrument, hands stems up, feet stems down |
 | `"drum_grooves": {...}` | Writes whole kit bars (hi-hats, slashes, triplets, flams, rolls, a second hands voice) into the bars whose kick and snare match, or into listed bars, with the bars' words and dynamics (`"marks"`); see `repair.py --help` |
@@ -152,6 +230,12 @@ Before changing a tool or `merge.json`, copy the merged score aside; after,
 `score.py diff <copy> <new>` lists every bar whose notes or marks (lyrics,
 articulations, noteheads, directions) changed.
 
+When only some of a full score's parts are wanted (the band's, not the
+singer's), read the whole score, so the drawing check can match every
+stave, then copy out the wanted parts:
+
+    python3 tools/omr/score.py extract omr/<piece>-merged.mxl omr/<piece>-band.musicxml "Lead Guitar" "Drum Set"
+
 ## The tools
 
 | File | Does |
@@ -161,8 +245,10 @@ articulations, noteheads, directions) changed.
 | `book.py` | Reads a PDF in chunks: retries, splits, resumes, joins |
 | `keep_reading.py` | Reruns `process.py` after interruptions, for a read left alone |
 | `pagefix.py` | Puts right a page read with the wrong number of bars |
-| `pages.py` | `merge`, `images`, `rerender`, `split`: getting pages into one readable PDF |
-| `score.py` | `check`, `names` and `diff` for any `.mxl` |
+| `pages.py` | `merge`, `images`, `rerender`, `split`, `svg`: getting pages into one readable PDF |
+| `tab.py` | Guitar tablature read from the drawing into MusicXML, with string and fret |
+| `transcribed.py` | A percussion score built from a transcription by eye, for a scan too poor to read |
+| `score.py` | `check`, `names`, `diff` and `extract` for any `.mxl` |
 | `draft.py` | Drafts `merge.json` from a read |
 | `merge.py` | The merge, on its own |
 | `repair.py` | The repairs, on their own |

@@ -5,6 +5,7 @@ USAGE (from the repo root):
     python3 tools/omr/score.py check <score.mxl> [<score.mxl> ...] [--time 4/4]
     python3 tools/omr/score.py names <score.mxl>
     python3 tools/omr/score.py diff <old.mxl> <new.mxl>
+    python3 tools/omr/score.py extract <score> <out> <part name> [<part name> ...]
 
 check   Per part: bars, notes, rests, octave range, whether it carries a
         <transpose> (a part without one is read as concert pitch), and every
@@ -22,6 +23,10 @@ diff   Every bar, per part (matched by name), whose notes or marks differ
        between two versions: lyrics, articulations, noteheads, directions.
        Save the merged score before changing a tool or merge.json, run
        again, and diff: what changed is what to look at.
+extract  A copy of the score with only the named parts (as `names` prints
+       them), to .mxl or plain .musicxml by <out>'s suffix: the band's
+       parts without the singer's, say. Read the whole score first; the
+       drawing check matches staves to every part.
 
 This reads structure, not notation: it says where to look, it is not a
 proofread.
@@ -107,6 +112,35 @@ def save(root: ET.Element, out: Path | str, like: Path | str | None = None) -> N
                     f'<rootfile full-path="{inner}"/></rootfiles></container>'))
             zout.writestr(inner, xml_bytes)
     os.replace(tmp, out)
+
+
+def extract(root: ET.Element, keep: list[str]) -> ET.Element:
+    """The score with only the parts named in `keep`, in score order; a
+    bracket or brace (<part-group>) left holding none of them goes too."""
+    names = dict(part_names(root))
+    missing = [name for name in keep if name not in names.values()]
+    if missing:
+        raise ValueError(f"no part named {', '.join(missing)}; the parts are {', '.join(names.values())}")
+    gone = {pid for pid, name in names.items() if name not in keep}
+    part_list = root.find("part-list")
+    open_groups: dict[str, tuple[ET.Element, bool]] = {}
+    for child in list(part_list):
+        if child.tag == "score-part":
+            if child.get("id") in gone:
+                part_list.remove(child)
+            else:
+                open_groups = {n: (start, True) for n, (start, _) in open_groups.items()}
+        elif child.tag == "part-group" and child.get("type") == "start":
+            open_groups[child.get("number", "1")] = (child, False)
+        elif child.tag == "part-group" and child.get("type") == "stop":
+            start, used = open_groups.pop(child.get("number", "1"), (None, True))
+            if not used:
+                part_list.remove(start)
+                part_list.remove(child)
+    for part in root.findall("part"):
+        if part.get("id") in gone:
+            root.remove(part)
+    return root
 
 
 def part_names(root: ET.Element) -> list[tuple[str, str]]:
@@ -235,11 +269,14 @@ def judge(part: ET.Element, assume: Fraction | None = None) -> tuple[list[BadBar
 
 # Lowest written note, as a MIDI number, by a word in the part name: the
 # first word that matches wins, so "contrabass" is tried before "bass".
-# An instrument not named here is not range-checked.
+# An instrument not named here is not range-checked. A bass guitar is
+# written under a bass clef with an 8 below, which MusicXML holds at
+# sounding pitch: its open E string is E1.
 LOWEST_WRITTEN = (
     ("piccolo", 62), ("flute", 60), ("oboe", 58), ("clarinet", 52), ("bassoon", 34),
     ("horn", 42), ("trumpet", 54), ("trombone", 40), ("violin", 55), ("viola", 48),
-    ("violoncello", 36), ("cello", 36), ("contrabass", 40), ("double bass", 40), ("bass", 40),
+    ("violoncello", 36), ("cello", 36), ("contrabass", 40), ("double bass", 40),
+    ("bass guitar", 28), ("electric bass", 28), ("bass", 40),
 )
 STEPS = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
 
@@ -424,9 +461,20 @@ def main(argv: list[str]) -> int:
             print(__doc__, file=sys.stderr)
             return 2
         argv = argv[:at] + argv[at + 2:]
-    if len(argv) < 2 or argv[0] not in ("check", "names", "diff"):
+    if len(argv) < 2 or argv[0] not in ("check", "names", "diff", "extract"):
         print(__doc__, file=sys.stderr)
         return 2
+    if argv[0] == "extract":
+        if len(argv) < 4:
+            print(__doc__, file=sys.stderr)
+            return 2
+        try:
+            save(extract(load(argv[1]), argv[3:]), argv[2], like=argv[1])
+        except ValueError as error:
+            print(error, file=sys.stderr)
+            return 1
+        print(f"{argv[2]}: {', '.join(name for _, name in part_names(load(argv[2])))}")
+        return 0
     if argv[0] == "diff":
         if len(argv) != 3:
             print(__doc__, file=sys.stderr)

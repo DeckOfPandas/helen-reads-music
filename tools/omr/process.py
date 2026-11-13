@@ -155,6 +155,16 @@ def printed_bars(piece: Path) -> dict[int, int] | None:
     return {int(page): span[1] - span[0] + 1 for page, span in table.items() if not page.startswith("_")}
 
 
+def first_printed_bar(piece: Path) -> int | None:
+    """The first page's first printed bar number, from printed-bars.json."""
+    path = piece / PRINTED_BARS
+    if not path.is_file():
+        return None
+    table = json.loads(path.read_text(encoding="utf-8"))
+    pages = sorted((int(page), span) for page, span in table.items() if not page.startswith("_"))
+    return pages[0][1][0] if pages else None
+
+
 def first_read(pdf: Path, out: Path, name: str, run) -> tuple[book.Book, int, list[str]]:
     """The 300 DPI read, in chunks (book.py); at the DPI that fixes it if
     Audiveris refuses the resolution. (book, DPI read at, notes)."""
@@ -165,7 +175,8 @@ def first_read(pdf: Path, out: Path, name: str, run) -> tuple[book.Book, int, li
     printed = printed_bars(out.parent)
     if printed:
         dpi = int(settled[-1].name.removeprefix("first-").removesuffix("dpi")) if settled else None
-        read = book.read_book(pdf, chunks / f"by-page-{dpi or 'drawn'}", name, dpi, run, printed=printed)
+        read = book.read_book(pdf, chunks / f"by-page-{dpi or 'drawn'}", name, dpi, run, printed=printed,
+                              first_bar=first_printed_bar(out.parent))
         return read, dpi or book.AS_DRAWN_DPI, read.notes
     if settled:
         dpi = int(settled[-1].name.removeprefix("first-").removesuffix("dpi"))
@@ -341,7 +352,7 @@ def drawing_pass(root: score.ET.Element, piece: Path, table: dict, assume_time,
                  patched_only: bool = False) -> list[str]:
     """Check and correct the score against the PDFs' own drawing
     (drawing_check.py), leaving the bars merge.json patches by hand alone;
-    or, `patched_only`, check just those bars, correcting only their ties.
+    or, `patched_only`, check just those bars, only adding the ties drawn.
     Report lines."""
     import drawing_check
     import vector
@@ -356,7 +367,7 @@ def drawing_pass(root: score.ET.Element, piece: Path, table: dict, assume_time,
     if patched_only:
         findings, _ = drawing_check.check(root, piece, pdfs, fix=True, assume=assume_time, only=skip)
         return [f"hand patches checked against the drawing: {len(findings)} disagree, "
-                f"{sum(f.fixed for f in findings)} in their ties only (set as drawn)",
+                f"{sum(f.fixed for f in findings)} in their ties only (drawn ties added, the patch's kept)",
                 *(f"  {f.describe()}" for f in findings)]
     _, report = drawing_check.check(root, piece, pdfs, fix=True, assume=assume_time, skip=skip)
     return report

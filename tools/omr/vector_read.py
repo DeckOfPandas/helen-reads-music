@@ -13,7 +13,7 @@ Built on vector.py's staves, stems and named glyphs. For a bar it finds:
   flags      flag glyphs at a stem's far end
   rests      by glyph; a whole/half rest rectangle is a whole rest when it
              hangs from a line, a half rest when it sits on one
-  dots       augmentation dots just right of a head
+  dots       augmentation dots just right of a head, one or a row
   marks      accent, marcato, tenuto, staccato and the open circle, beside
              a head on its stem's far side or near side
 
@@ -38,6 +38,41 @@ RESTS = {"rest-quarter": Fraction(1), "rest-eighth": Fraction(1, 2), "rest-16th"
 FLAGS = {"flag-8th-up": 1, "flag-8th-down": 1, "flag-16th-up": 2, "flag-16th-down": 2}
 MARKS = {"accent": "accent", "marcato": "strong", "tenuto": "tenuto", "dot-small": "staccato", "open": "open"}
 ACCIDENTALS = {"flat": -1, "sharp": 1, "natural": 0}
+BEAM_THICKEST = 8.0                 # points: half a space even on a stave drawn twice the usual size
+FLAT_BULB = 0.7                    # a flat's note is this many spaces above the flat's foot
+
+
+def accidental_y(sign: vector.Glyph, gap: float) -> float:
+    """The height of the line or space an accidental is drawn for: a sharp
+    or natural is centred on it; a flat's stem rises above its bulb."""
+    return sign.y1 - gap * FLAT_BULB if sign.name == "flat" else sign.cy
+
+
+def accidentals_of(heads: list[vector.Glyph], signs: list[vector.Glyph], gap: float) -> dict[int, vector.Glyph]:
+    """Which accidental each head has, by id(head). An accidental is its
+    note's: the nearest head to its right on its line or space, reached
+    within 1.6 spaces, or across a chord's stacked columns of accidentals
+    with no wider opening than 0.8 spaces. A sign no head claims is a key's."""
+    def reaches(sign, head) -> bool:
+        edge = sign.x1
+        while head.x0 - edge >= gap * 1.6:
+            bridge = [s for s in signs if s is not sign and -gap * 0.2 <= s.x0 - edge < gap * 0.8
+                      and s.x1 > edge and s.x1 <= head.x0]
+            if not bridge:
+                return False
+            edge = max(s.x1 for s in bridge)
+        return True
+
+    owner: dict[int, vector.Glyph] = {}
+    for sign in signs:
+        y = accidental_y(sign, gap)
+        row = sorted((h for h in heads if h.x0 - sign.x1 >= 0 and abs(h.cy - y) < gap * 0.3), key=lambda h: h.x0)
+        if not row or not reaches(sign, row[0]):
+            continue
+        head = row[0]
+        if id(head) not in owner or sign.x1 > owner[id(head)].x1:
+            owner[id(head)] = sign
+    return owner
 
 
 @dataclass
@@ -58,29 +93,34 @@ class Curve:
     points at its two ends."""
     left: tuple[float, float]
     right: tuple[float, float]
+    steep: bool = False             # taller than a whole tie: half a tie cut off at a system's edge, or not one
 
     @property
     def width(self) -> float:
         return self.right[0] - self.left[0]
 
 
+_subpaths = vector.subpaths
+
+
 def curves_on_page(pg) -> list[Curve]:
-    """Long, low filled paths drawn mostly with curves: ties and slurs."""
+    """Long, low filled shapes, at least half their pieces curves: ties and
+    slurs, each subpath of a path on its own."""
     curves = []
     for d in pg.get_drawings():
-        if d.get("fill") is None:
+        if d.get("fill") is None or any(item[0] not in ("c", "l") for item in d["items"]):
             continue
-        items = d["items"]
-        kinds = [item[0] for item in items]
-        if kinds.count("c") < 2 or any(k not in ("c", "l") for k in kinds) or kinds.count("c") < len(kinds) * 0.6:
-            continue
-        r = d["rect"]
-        if r.width < 2.5 or r.height > r.width * 0.6:
-            continue
-        points = [p for item in items for p in item[1:]]
-        left = min(points, key=lambda p: p.x)
-        right = max(points, key=lambda p: p.x)
-        curves.append(Curve((left.x, left.y), (right.x, right.y)))
+        for items in _subpaths(d["items"]):
+            kinds = [item[0] for item in items]
+            if kinds.count("c") < 2 or kinds.count("c") < len(kinds) * 0.5:
+                continue
+            points = [p for item in items for p in item[1:]]
+            left = min(points, key=lambda p: p.x)
+            right = max(points, key=lambda p: p.x)
+            width, height = right.x - left.x, max(p.y for p in points) - min(p.y for p in points)
+            if width < 2.5 or height > width * 0.85:
+                continue
+            curves.append(Curve((left.x, left.y), (right.x, right.y), steep=height > width * 0.6))
     return curves
 
 
@@ -112,17 +152,17 @@ class Beam:
 
 
 def beams_on_page(pg) -> list[Beam]:
-    """Four-sided pieces with two vertical ends, from every filled path made
-    only of lines."""
+    """Four-sided pieces with two vertical ends, from every dark filled path
+    made only of lines (a light one is a background or a mask)."""
     beams = []
     for d in pg.get_drawings():
-        if d.get("fill") is None:
+        if d.get("fill") is None or min(d["fill"]) > 0.5:
             continue
         # A flat beam can be drawn as a rectangle (re) or a quad (qu).
         for item in d["items"]:
             if item[0] == "re":
                 r = item[1]
-                if r.width > 2 and 0.2 < r.height < 3:
+                if r.width > 2 and 0.2 < r.height <= BEAM_THICKEST:
                     beams.append(Beam(r.x0, r.x1, r.y0, r.y0, r.height))
             elif item[0] == "qu":
                 q = item[1]
@@ -133,34 +173,63 @@ def beams_on_page(pg) -> list[Beam]:
                     if len(left) == 2 and len(right) == 2:
                         beams.append(Beam(xs[0], xs[-1], min(p.y for p in left), min(p.y for p in right),
                                           abs(left[0].y - left[1].y)))
-        if any(item[0] != "l" for item in d["items"]):
-            continue
-        items = d["items"]
-        for start in range(0, len(items) - 3, 4):
-            quad = items[start:start + 4]
+        # A beam drawn as four lines: in runs of lines, which a path can mix
+        # with rectangles and curves.
+        runs: list[list] = [[]]
+        for item in d["items"]:
+            if item[0] == "l":
+                runs[-1].append(item)
+            elif runs[-1]:
+                runs.append([])
+        quads = [run[start:start + 4] for run in runs for start in range(0, len(run) - 3, 4)]
+        for quad in quads:
             points = [quad[0][1]] + [item[2] for item in quad]
             verticals = [(p, q) for p, q in zip(points, points[1:]) if abs(p.x - q.x) < 0.05 and abs(p.y - q.y) > 0.2]
             if len(verticals) != 2:
                 continue
             (a, b), (c, e) = sorted(verticals, key=lambda v: v[0].x)
-            if c.x - a.x < 2:
-                continue
+            if c.x - a.x < 2 or abs(a.y - b.y) > BEAM_THICKEST:
+                continue                                        # too short, or a background, not a beam
             beams.append(Beam(a.x, c.x, min(a.y, b.y), min(c.y, e.y), abs(a.y - b.y)))
     return beams
 
 
-def _attach_stem(head, stems: list[vector.Stem], gap: float) -> tuple[vector.Stem, str] | None:
-    """The stem a head hangs on, and its direction."""
+def _touches(stem: vector.Stem, head) -> bool:
+    return min(abs(stem.x - head.x1), abs(stem.x - head.x0)) < 0.8
+
+
+def _stem_direction(stem: vector.Stem, heads: list, gap: float) -> str | None:
+    """Up if noteheads sit at the stem's foot and none at its top, down the
+    other way round; None if heads sit at both ends or neither."""
+    at_top = any(_touches(stem, h) and abs(h.cy - stem.y0) < gap * 0.75 for h in heads)
+    at_foot = any(_touches(stem, h) and abs(h.cy - stem.y1) < gap * 0.75 for h in heads)
+    if at_foot != at_top:
+        return "up" if at_foot else "down"
+    return None
+
+
+def _attach_stem(head, stems: list[vector.Stem], gap: float, heads: list | None = None) -> tuple[vector.Stem, str] | None:
+    """The stem a head hangs on, and its direction. The direction is the
+    stem's own (_stem_direction, from `heads`): the end with no notehead
+    is its tip. A head in a chord of a second sits on the stem's far side,
+    so either edge may meet it. Where the stem's ends don't tell, a head
+    meets an up-stem with its right edge and a down-stem with its left."""
     best = None
     for stem in stems:
-        if not (stem.y0 - gap * 0.6 <= head.cy <= stem.y1 + gap * 0.6):
+        if not (stem.y0 - gap * 0.6 <= head.cy <= stem.y1 + gap * 0.6) or not _touches(stem, head):
             continue
-        if abs(stem.x - head.x1) < 0.8 and stem.y0 < head.cy - gap * 0.3:
-            candidate = (abs(stem.x - head.x1), stem, "up")
-        elif abs(stem.x - head.x0) < 0.8 and stem.y1 > head.cy + gap * 0.3:
-            candidate = (abs(stem.x - head.x0), stem, "down")
-        else:
+        direction = _stem_direction(stem, heads or [head], gap)
+        if direction is None:
+            if abs(stem.x - head.x1) < 0.8 and stem.y0 < head.cy - gap * 0.3:
+                direction = "up"
+            elif abs(stem.x - head.x0) < 0.8 and stem.y1 > head.cy + gap * 0.3:
+                direction = "down"
+            else:
+                continue
+        elif (direction == "up" and stem.y0 >= head.cy - gap * 0.3) or \
+                (direction == "down" and stem.y1 <= head.cy + gap * 0.3):
             continue
+        candidate = (min(abs(stem.x - head.x1), abs(stem.x - head.x0)), stem, direction)
         if best is None or candidate[0] < best[0]:
             best = candidate
     return (best[1], best[2]) if best else None
@@ -187,12 +256,12 @@ def read_bar(page: vector.Page, beams: list[Beam], stave_index: int, bar: int,
 
     chords: dict[int, Event] = {}
     loose: list[Event] = []
+    owners = accidentals_of(heads, accidentals, gap)
     for glyph in heads:
         head = Head(round(stave.step(glyph.cy)), HEADS[glyph.name], glyph.cx, glyph.cy, left=glyph.x0)
-        before = [a for a in accidentals if 0 < glyph.x0 - a.x1 < gap * 1.6 and abs(a.cy - glyph.cy) < gap * 0.7]
-        if before:
-            head.accidental = ACCIDENTALS[min(before, key=lambda a: glyph.x0 - a.x1).name]
-        attached = _attach_stem(glyph, stems, gap) if head.kind in ("black", "half", "x") else None
+        if id(glyph) in owners:
+            head.accidental = ACCIDENTALS[owners[id(glyph)].name]
+        attached = _attach_stem(glyph, stems, gap, heads) if head.kind in ("black", "half", "x") else None
         if attached is None:
             length = {"whole": Fraction(4), "slash": Fraction(1)}.get(head.kind)
             if length is None:
@@ -238,10 +307,9 @@ def read_bar(page: vector.Page, beams: list[Beam], stave_index: int, bar: int,
                 if glyph.name == "dot-small" and any(abs(glyph.cy - h.y) < gap * 0.6 for h in event.heads):
                     continue                                    # beside, not above: not staccato
                 event.marks.add(MARKS[glyph.name])
-        dots = [g for g in glyphs if g.name == "dot" and any(0 < g.x0 - (h.x + gap * 0.6) < gap * 1.6
-                                                              and abs(g.cy - h.y) < gap * 0.8 for h in event.heads)]
-        if dots:
-            event.length = event.length * Fraction(3, 2)
+        count = max((_dots_after(h, glyphs, gap) for h in event.heads), default=0)
+        if count:
+            event.length = event.length * (2 - Fraction(1, 2 ** count))
 
     rests = []
     for glyph in glyphs:
@@ -268,6 +336,24 @@ def read_bar(page: vector.Page, beams: list[Beam], stave_index: int, bar: int,
         if tremolo:
             voices = {"single": tremolo}
     return voices
+
+
+def _dots_after(head: Head, glyphs: list[vector.Glyph], gap: float) -> int:
+    """How many augmentation dots follow a head: the first right of it
+    within 2.5 spaces (a chord's dots line up, some pushed out) with no
+    other notehead between, each further one close after the last, in a row."""
+    dots = [g for g in glyphs if g.name == "dot"]
+    heads = [g for g in glyphs if g.name in HEADS]
+    first = [g for g in dots if 0 < g.x0 - (head.x + gap * 0.6) < gap * 2.5 and abs(g.cy - head.y) < gap * 0.8
+             and not any(head.x + gap * 0.6 < h.cx < g.x0 for h in heads)]
+    if not first:
+        return 0
+    last, count = min(first, key=lambda g: g.x0), 1
+    while True:
+        after = [g for g in dots if 0 < g.x0 - last.x1 < gap and abs(g.cy - last.cy) < gap * 0.3]
+        if not after:
+            return count
+        last, count = min(after, key=lambda g: g.x0), count + 1
 
 
 def _find_ties(heads: list[Head], elsewhere: list[Head], curves: list[Curve], gap: float,
@@ -299,13 +385,17 @@ def _find_ties(heads: list[Head], elsewhere: list[Head], curves: list[Curve], ga
             # height, so not another voice's) makes the curve a slur.
             between = any(start.x + gap * 0.5 < h.x < end.x - gap * 0.5 and abs(h.y - start.y) < gap * 3.5
                           for h in everything)
-            if start.step == end.step and end.x > start.x and not between:
+            if start.step == end.step and end.x > start.x and not between and not curve.steep:
                 start.tie_start = end.tie_stop = True
             continue
         if curve.width >= gap * 6:
             continue
+        found = start if start is not None else end
+        if curve.steep and not (start is not None and curve.right[0] > max(h.x for h in everything) or
+                                end is not None and curve.left[0] < min(h.x for h in everything)):
+            continue                                            # a cut-off tie runs past every note
         between = [h for h in everything if curve.left[0] - near < h.x < curve.right[0] + near
-                   and h is not start and h is not end]
+                   and abs(h.x - found.x) > gap * 0.5]                 # not its own chord
         if between:
             continue
         if mine_start:
@@ -405,24 +495,40 @@ CLEF_BOTTOM_LINE = {("G", 2): ("E", 4), ("F", 4): ("G", 2), ("C", 3): ("F", 3), 
                     ("percussion", 3): ("E", 4), ("percussion", 2): ("E", 4)}
 
 
-def pitch_at(step: int, clef: tuple[str, int], octave_change: int = 0) -> tuple[str, int]:
-    """The diatonic note at a stave position under a clef."""
+def pitch_at(step: int, clef: tuple, octave_change: int = 0) -> tuple[str, int]:
+    """The diatonic note at a stave position under a clef: (sign, line),
+    or (sign, line, octave change) for a clef with an 8 below or above,
+    whose notes are an octave from the plain clef's, as MusicXML writes them."""
+    if len(clef) == 3:
+        octave_change += clef[2]
+        clef = clef[:2]
     name, octave = CLEF_BOTTOM_LINE.get(clef, ("E", 4))
     index = STEP_NAMES.index(name) + octave * 7 + step + octave_change * 7
     return STEP_NAMES[index % 7], index // 7
 
 
 CLEF_GLYPHS = {"clef-treble": ("G", 2), "clef-bass": ("F", 4), "clef-alto": ("C", 3),
-               "clef-percussion": ("percussion", 2)}
+               "clef-percussion": ("percussion", 2),
+               "clef-treble-8vb": ("G", 2, -1), "clef-bass-8vb": ("F", 4, -1)}
 
 
-def drawn_clef(page: vector.Page, stave_index: int) -> tuple[str, int] | None:
-    """The clef drawn at the start of a stave."""
+def drawn_clef(page: vector.Page, stave_index: int) -> tuple | None:
+    """The clef drawn at the start of a stave; with its octave change when
+    a small 8 drawn on its own (`clef-8`) sits under it (-1) or over it (+1)."""
     clefs = sorted((g for g in page.glyphs if g.stave == stave_index and g.name in CLEF_GLYPHS), key=lambda g: g.x0)
-    return CLEF_GLYPHS[clefs[0].name] if clefs else None
+    if not clefs:
+        return None
+    clef, found = clefs[0], CLEF_GLYPHS[clefs[0].name]
+    gap = page.staves[stave_index].gap
+    for eight in (g for g in page.glyphs if g.name == "clef-8" and clef.x0 - gap <= g.cx <= clef.x1 + gap):
+        if len(found) == 2 and -gap * 0.5 <= eight.y0 - clef.y1 <= gap:
+            return found + (-1,)
+        if len(found) == 2 and -gap * 0.5 <= clef.y0 - eight.y1 <= gap:
+            return found + (1,)
+    return found
 
 
-def spell(voices: dict[str, list[Event]], clef: tuple[str, int], fifths: int) -> None:
+def spell(voices: dict[str, list[Event]], clef: tuple, fifths: int) -> None:
     """Give every head its pitch (step letter, alteration, octave), from its
     stave position, the clef, the key and the bar's accidentals: a drawn
     accidental holds for later notes on the same line or space until the
