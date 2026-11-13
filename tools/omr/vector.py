@@ -33,7 +33,9 @@ by where it sits), rest-quarter, rest-eighth, rest-16th, flag-8th-up,
 flag-8th-down, flag-16th-up, flag-16th-down, dot (augmentation), dot-small
 (staccato), accent, marcato, tenuto, open (the small circle of an open
 hi-hat), flat, sharp, natural, clef-treble, clef-bass, clef-alto,
-clef-percussion, other (anything else: text, dynamics, slurs).
+clef-percussion, clef-treble-8vb and clef-bass-8vb (one shape with its
+small 8 below), clef-8 (the small 8 under or over a clef, drawn on its
+own), other (anything else: text, dynamics, slurs).
 """
 from __future__ import annotations
 
@@ -153,6 +155,71 @@ def fingerprint(drawing: dict) -> str:
                 coords.append(f"{p.x0 - r.x0:.1f},{p.y0 - r.y0:.1f},{p.x1 - r.x0:.1f},{p.y1 - r.y0:.1f}")
         parts.append(item[0] + ":" + ";".join(coords))
     return "|".join(parts)
+
+
+def subpaths(items: list) -> list[list]:
+    """A path's pieces of lines and curves, split where one doesn't start
+    where the last ended: one path can draw several ties, or many glyphs."""
+    parts: list[list] = []
+    for item in items:
+        if parts and abs(item[1].x - parts[-1][-1][-1].x) < 0.01 and abs(item[1].y - parts[-1][-1][-1].y) < 0.01:
+            parts[-1].append(item)
+        else:
+            parts.append([item])
+    return parts
+
+
+def _items_rect(items: list):
+    import pymupdf
+    points = [p for item in items for p in item[1:]]
+    return pymupdf.Rect(min(p.x for p in points), min(p.y for p in points),
+                        max(p.x for p in points), max(p.y for p in points))
+
+
+MERGED_PATH_SPAN = 40.0     # pt both ways: more than a stave's height, and wider than any one glyph
+
+
+def _outlines(drawing: dict) -> list[tuple[object, list]] | None:
+    """A filled path of lines and curves as its outlines, each with the
+    holes inside it (a minim's, a flat's) and its rect, largest first; None
+    for any other path."""
+    items = drawing["items"]
+    if any(item[0] not in ("l", "c") for item in items):
+        return None
+    groups: list[tuple[object, list]] = []
+    for part in sorted(subpaths(items), key=lambda p: -_items_rect(p).get_area()):
+        rect = _items_rect(part)
+        outer = next((g for g in groups if g[0].x0 - 0.05 <= rect.x0 and rect.x1 <= g[0].x1 + 0.05
+                      and g[0].y0 - 0.05 <= rect.y0 and rect.y1 <= g[0].y1 + 0.05), None)
+        if outer is None:
+            groups.append((rect, list(part)))
+        else:
+            outer[1].extend(part)
+    return groups
+
+
+def merges_glyphs(drawings: list[dict]) -> bool:
+    """Whether the page draws many glyphs as one path, as a browser's print
+    of a score does: some filled path holds several outlines and spans more
+    than MERGED_PATH_SPAN both ways. Elsewhere a path is one glyph, though
+    it has several outlines (a bass clef and its dots)."""
+    for d in drawings:
+        r = d["rect"]
+        if d.get("fill") is None or r.width <= MERGED_PATH_SPAN or r.height <= MERGED_PATH_SPAN:
+            continue
+        if d["fill"] != (1.0, 1.0, 1.0) and len(_outlines(d) or []) >= 3:
+            return True
+    return False
+
+
+def filled_shapes(drawing: dict, split: bool) -> list[tuple[str, object]]:
+    """A filled path's glyphs, as (fingerprint, rect): the whole path,
+    unless `split` (the page merges glyphs) and it has several outlines,
+    each then a glyph."""
+    groups = _outlines(drawing) if split else None
+    if not groups or len(groups) == 1:
+        return [(fingerprint(drawing), drawing["rect"])]
+    return [(fingerprint({"rect": rect, "items": group}), rect) for rect, group in groups]
 
 
 def _staves(horizontals: list[tuple[float, float, float]], count: int = 5) -> list[Stave]:
@@ -278,7 +345,8 @@ def _vertical_ends(page, touching: Counter, total: Counter) -> None:
     import pymupdf
     drawings = page.get_drawings()
     sides: dict[int, list] = defaultdict(list)
-    shapes = [d["rect"] for d in drawings if d.get("fill") is not None]
+    split = merges_glyphs(drawings)
+    shapes = [rect for d in drawings if d.get("fill") is not None for _, rect in filled_shapes(d, split)]
     # One path can hold a page's beams as rectangles or quads: each counts.
     shapes += [item[1].rect if item[0] == "qu" else item[1] for d in drawings if d.get("fill") is not None
                for item in d["items"] if item[0] in ("re", "qu")]
@@ -362,9 +430,10 @@ def read_page(page, lines: int = 5) -> Page:
             merged.insert(0, stave.left)                          # the system's opening line, if not drawn here
         bar_lines.append(merged)
     glyphs = smufl_glyphs(page)
+    split = merges_glyphs(filled)
     for d in filled:
-        r = d["rect"]
-        glyphs.append(Glyph(fingerprint(d), r.x0, r.y0, r.x1, r.y1))
+        for key, r in filled_shapes(d, split):
+            glyphs.append(Glyph(key, r.x0, r.y0, r.x1, r.y1))
     result = Page(staves, bar_lines, glyphs, stems, ledgers, verticals)
     for glyph in glyphs:
         _place_glyph(result, glyph)

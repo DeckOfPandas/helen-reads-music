@@ -1532,6 +1532,14 @@ def _build_tremolo(token: str, voice: str, staff: str | None, divisions: Fractio
 def _build_notes(token: str, voice: str, staff: str | None, divisions: Fraction) -> list[ET.Element]:
     if "/" in token.split(":")[0]:
         return _build_tremolo(token, voice, staff, divisions)
+    heads, _, length = token.split("@")[0].rstrip("~").rpartition(":")
+    if length == "g":
+        # A grace note (an acciaccatura, slashed quaver) takes no time: it has no duration.
+        notes = _build_notes(token.replace(":g", ":1/2", 1), voice, staff, divisions)
+        for note in notes:
+            note.remove(note.find("duration"))
+            _place(note, ET.Element("grace", {"slash": "yes"}))
+        return notes
     pitches, length, tie_start, lyric = _parse_pitched(token)
     notes = []
     for index, head in enumerate(pitches or [None]):
@@ -1698,7 +1706,8 @@ def apply_patches(root: ET.Element, patches: dict, assume: Fraction | None = Non
         {"up": "...", "down": "...", "up2": "..."}  a drum bar replaced, as a drum groove
         [<patch>, <patch>]          several, in order: one voice each
     Pitches as Bb4, F#5, Bn4; x before the step for an x notehead; ~ before it
-    for a tie from the note before, ~ after the length to tie on; @text after
+    for a tie from the note before, ~ after the length to tie on; a length
+    of g for a grace note (slashed, before the next note: "+C5:g"); @text after
     for a lyric; A/B:len for a fingered tremolo (chord A alternating with
     chord B for len crotchets). Applied last, to the finished score; a
     patched voice must fill its bar exactly."""

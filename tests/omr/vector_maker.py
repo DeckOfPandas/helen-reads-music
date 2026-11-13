@@ -64,6 +64,7 @@ SHAPES = {
     "rest-16th": (3.5, 7.0, "polygon", 17),
     "time-3": (3.0, 3.0, "polygon", 18),
     "time-4": (3.0, 3.0, "polygon", 19),
+    "clef-8": (2.0, 3.0, "polygon", 31),
     **{f"fret-{n}": (1.75, 2.5, "polygon", 20 + n) for n in range(10)},    # tab digits, one shape each
 }
 
@@ -90,16 +91,28 @@ class Engraver:
     height: float = 842.0
     stem_width: float = STEM_WIDTH
     bar_width: float = BAR_WIDTH
+    merged: bool = False          # every symbol on a page in one filled path, as a browser prints a score
     drawn: list[tuple[int, pymupdf.Rect, str]] = field(default_factory=list)   # page index, box, name
 
     def __post_init__(self):
         self.doc = pymupdf.open()
         self.shape = None
+        self.pending: list[tuple[str, float, float]] = []
         self.new_page()
+
+    def _flush(self) -> None:
+        """Draw the page's held symbols as one filled path."""
+        if not self.pending:
+            return
+        for name, x, y in self.pending:
+            self._outline(name, x, y)
+        self.shape.finish(color=None, fill=BLACK, closePath=True)
+        self.pending = []
 
     def new_page(self) -> None:
         """Draw from here on on a fresh page after the last."""
         if self.shape is not None:
+            self._flush()
             self.shape.commit()
         self.page = self.doc.new_page(width=self.width, height=self.height)
         self.shape = self.page.new_shape()
@@ -142,18 +155,29 @@ class Engraver:
 
     def glyph(self, name: str, x: float, y: float) -> pymupdf.Rect:
         """A symbol with its top-left corner at (x, y)."""
-        width, height, kind, detail = SHAPES[name]
+        width, height, _, _ = SHAPES[name]
         rect = pymupdf.Rect(x, y, x + width, y + height)
+        if self.merged:
+            self.pending.append((name, x, y))
+        else:
+            self._outline(name, x, y)
+            self.shape.finish(color=None, fill=BLACK, closePath=True)
+        self.drawn.append((self.page.number, rect, name))
+        return rect
+
+    def _outline(self, name: str, x: float, y: float) -> None:
+        width, height, kind, detail = SHAPES[name]
         if kind == "oval":
-            self.shape.draw_oval(rect)
+            self.shape.draw_oval(pymupdf.Rect(x, y, x + width, y + height))
+        elif kind == "rect" and self.merged:
+            # As four lines, not a rectangle item: a merged path is lines and curves.
+            corners = [(x, y), (x + width, y), (x + width, y + height), (x, y + height)]
+            self.shape.draw_polyline(corners + [corners[0]])
         elif kind == "rect":
-            self.shape.draw_rect(rect)
+            self.shape.draw_rect(pymupdf.Rect(x, y, x + width, y + height))
         else:
             points = [(x + px, y + py) for px, py in _polygon(width, height, detail)]
             self.shape.draw_polyline(points + [points[0]])
-        self.shape.finish(color=None, fill=BLACK, closePath=True)
-        self.drawn.append((self.page.number, rect, name))
-        return rect
 
     def head(self, stave: Stave, x: float, step: int, kind: str = "black") -> pymupdf.Rect:
         name = f"notehead-{kind}"
@@ -222,26 +246,30 @@ class Engraver:
     # --- output -------------------------------------------------------------------
 
     def save(self, path: Path) -> Path:
+        self._flush()
         self.shape.commit()
         self.doc.save(path)
         return path
 
     def catalogue(self, pdf: Path, piece: Path) -> Path:
         """Name every fingerprint drawn (glyphs.json), matching each filled
-        path in the saved PDF to the symbol drawn at its place."""
+        shape in the saved PDF (each glyph of a merged path) to the symbol
+        drawn at its place."""
         import vector
         glyphs = {}
         with pymupdf.open(pdf) as doc:
             for page in doc:
-                for d in page.get_drawings():
+                drawings = page.get_drawings()
+                split = vector.merges_glyphs(drawings)
+                for d in drawings:
                     if d.get("fill") is None:
                         continue
-                    r = d["rect"]
-                    for number, rect, name in self.drawn:
-                        if number == page.number and abs(r.x0 - rect.x0) < 0.3 and abs(r.y0 - rect.y0) < 0.3 \
-                                and abs(r.x1 - rect.x1) < 0.3 and abs(r.y1 - rect.y1) < 0.3:
-                            glyphs[vector.fingerprint(d)] = {"name": name}
-                            break
+                    for key, r in vector.filled_shapes(d, split):
+                        for number, rect, name in self.drawn:
+                            if number == page.number and abs(r.x0 - rect.x0) < 0.3 and abs(r.y0 - rect.y0) < 0.3 \
+                                    and abs(r.x1 - rect.x1) < 0.3 and abs(r.y1 - rect.y1) < 0.3:
+                                glyphs[key] = {"name": name}
+                                break
         path = piece / "glyphs.json"
         path.write_text(json.dumps({"glyphs": glyphs}), encoding="utf-8")
         return path

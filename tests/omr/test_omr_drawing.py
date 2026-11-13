@@ -374,6 +374,72 @@ def test_music_written_in_a_smufl_font_is_read(tmp_path):
         (1, [("x", 9)]), (1, [("black", 5)]), (1, [("black", 1)]), (2, [])]
 
 
+def test_a_page_drawing_all_its_symbols_as_one_path_is_read_symbol_by_symbol(tmp_path):
+    # A browser's print of a score: every symbol on the page outlined in one filled path.
+    e = Engraver(merged=True)
+    upper, lower = e.stave(100.0, [50.0, 130.0]), e.stave(160.0, [50.0, 130.0])
+    for stave, step in ((upper, 4), (lower, 2)):
+        e.clef(stave, "treble")
+        for x in (60.0, 75.0, 90.0, 105.0):
+            e.note(stave, x, step, stem="up")
+    events = read_one_bar(e, tmp_path)["single"]
+    with pymupdf.open(tmp_path / "piece" / "page.pdf") as doc:
+        assert len([d for d in doc[0].get_drawings() if d.get("fill") == (0.0, 0.0, 0.0)]) == 1
+    assert [(ev.length, [h.step for h in ev.heads]) for ev in events] == [(1, [4])] * 4
+
+
+def test_a_symbol_of_several_outlines_side_by_side_stays_one_symbol(tmp_path):
+    # A bass clef and its two dots in one path, on a page that draws each symbol on its own.
+    e = Engraver()
+    stave = e.stave(100.0, [50.0, 130.0])
+    e.note(stave, 80.0, 4)
+    e.shape.draw_polyline([(52.0, 101.0), (58.0, 103.0), (54.0, 110.0), (52.0, 101.0)])
+    e.shape.draw_oval(pymupdf.Rect(59.0, 102.0, 60.0, 103.0))
+    e.shape.draw_oval(pymupdf.Rect(59.0, 105.0, 60.0, 106.0))
+    e.shape.finish(color=None, fill=(0, 0, 0), closePath=True)
+    pdf = e.save(tmp_path / "page.pdf")
+    with pymupdf.open(pdf) as doc:
+        drawn = vector.read_page(doc[0])
+    clefs = [g for g in drawn.glyphs if g.x0 < 61.0]
+    assert [(round(g.x0), round(g.x1)) for g in clefs] == [(52, 60)]
+
+
+def engrave_octave_clef(tmp_path: Path) -> tuple[Path, Path]:
+    """A treble clef with its small 8 drawn apart below it; four B crotchets."""
+    e = Engraver()
+    stave = e.stave(100.0, [50.0, 130.0])
+    e.clef(stave, "treble")
+    e.glyph("clef-8", stave.left + 3.5, stave.y(4) + 10.3)
+    for x in (66.0, 80.0, 94.0, 108.0):
+        e.note(stave, x, 4)
+    piece = tmp_path / "piece"
+    piece.mkdir()
+    pdf = e.save(piece / "page.pdf")
+    e.catalogue(pdf, piece)
+    return piece, pdf
+
+
+def test_an_8_drawn_under_a_clef_makes_it_an_octave_clef(tmp_path):
+    piece, pdf = engrave_octave_clef(tmp_path)
+    with pymupdf.open(pdf) as doc:
+        drawn = vector.read_page(doc[0])
+    vector.name_glyphs(drawn, vector.load_catalogue(piece))
+    assert vector_read.drawn_clef(drawn, 0) == ("G", 2, -1)
+    assert vector_read.pitch_at(4, ("G", 2, -1)) == ("B", 3)
+    assert vector_read.pitch_at(4, ("G", 2)) == ("B", 4)
+
+
+def test_a_lost_octave_clef_is_put_back_and_its_notes_moved(tmp_path):
+    # The reader missed the 8: a plain treble clef, the notes an octave high.
+    piece, pdf = engrave_octave_clef(tmp_path)
+    root = ET.fromstring(make_score([("P1", "Guitar", part("P1", [bar([("B4", 1)] * 4, 1, attributes())]))]))
+    _, report = drawing_check.check(root, piece, [pdf])
+    assert any("bar 1 Guitar: clef octave drawn -1, score 0 -- FIXED" in line for line in report)
+    assert root.findtext(".//clef/clef-octave-change") == "-1"
+    assert pitches(notes_of(root, "P1", "1")) == [("B", 0, 3)] * 4
+    assert "0 bar(s) replaced" in report[0]
+
+
 def test_reads_whole_and_half_rests_by_where_they_sit(page):
     drawn, beams, curves = page
     whole = vector_read.read_bar(drawn, beams, 1, 0, Fraction(4))
@@ -490,6 +556,67 @@ def test_a_drum_voice_without_rests_is_padded_invisibly(checked):
     kicks = [n for n in notes_of(root, "P3", "2") if n.findtext("voice") == "2"]
     assert [(n.get("print-object"), n.find("rest") is not None, n.findtext("duration")) for n in kicks] == [
         ("no", True, "8"), (None, False, "4"), ("no", True, "4")]
+
+
+def _kick(x: float, length: Fraction) -> vector_read.Event:
+    return vector_read.Event(x, length, [vector_read.Head(1, "black", x, 0.0)], "down")
+
+
+def test_a_short_drum_voice_is_padded_where_its_gaps_are():
+    # Hi-hat quavers every 10 pt from x 60. Kicks: a crotchet on beat 1, then
+    # nothing until a quaver on beat 3 and a semiquaver straight after it.
+    hats = [vector_read.Event(60.0 + 10 * i, Fraction(1, 2), [vector_read.Head(9, "x", 60.0 + 10 * i, 0.0)], "up")
+            for i in range(8)]
+    kicks = [_kick(60.0, Fraction(1)), _kick(100.0, Fraction(1, 2)), _kick(105.0, Fraction(1, 4))]
+    padded = drawing_check._pad({"up": hats, "down": kicks}, Fraction(4))["down"]
+    assert [(e.length, e.hidden) for e in padded] == [
+        (1, False), (1, True), (Fraction(1, 2), False), (Fraction(1, 4), False), (Fraction(5, 4), True)]
+
+
+def test_a_drum_note_after_a_drawn_rest_follows_it_between_the_other_voices_onsets():
+    # Kick crotchet, dotted quaver rest drawn, a semiquaver on the "a" of beat 2
+    # (between two hi-hat quavers), a quaver on beat 3; the rest of the bar left empty.
+    hats = [vector_read.Event(60.0 + 10 * i, Fraction(1, 2), [vector_read.Head(9, "x", 60.0 + 10 * i, 0.0)], "up")
+            for i in range(8)]
+    kicks = [_kick(60.0, Fraction(1)), vector_read.Event(80.0, Fraction(3, 4)), _kick(95.0, Fraction(1, 4)),
+             _kick(100.0, Fraction(1, 2))]
+    padded = drawing_check._pad({"up": hats, "down": kicks}, Fraction(4))["down"]
+    assert [(e.length, e.hidden) for e in padded] == [
+        (1, False), (Fraction(3, 4), False), (Fraction(1, 4), False), (Fraction(1, 2), False), (Fraction(3, 2), True)]
+
+
+def test_a_drum_bar_with_a_flam_is_compared_never_rewritten(tmp_path):
+    # The kit page of the one-voice test, read into a bar holding a grace note:
+    # the drawing reads no grace notes, so rewriting the bar would lose it.
+    e = Engraver()
+    drums = e.stave(220.0, [50.0, 130.0])
+    e.clef(drums, "percussion")
+    for x in (60.0, 75.0, 90.0, 105.0):
+        e.note(drums, x, 5, stem="up")
+    piece = tmp_path / "piece"
+    piece.mkdir()
+    pdf = e.save(piece / "page.pdf")
+    e.catalogue(pdf, piece)
+    grace = ('<note><grace slash="yes"/><unpitched><display-step>C</display-step><display-octave>5</display-octave>'
+             "</unpitched><voice>1</voice><type>eighth</type></note>")
+    drum_attributes = ("<attributes><divisions>4</divisions><key><fifths>0</fifths></key><time><beats>4</beats>"
+                       "<beat-type>4</beat-type></time><clef><sign>percussion</sign></clef></attributes>")
+    root = ET.fromstring(make_score([("P1", "Drum Set", f'<part id="P1">{drum_bar(1, drum_attributes + grace)}</part>')]))
+    _, report = drawing_check.check(root, piece, [pdf])
+    assert "0 drum bar(s) written from the drawing" in report[0]
+    assert any("bar 1 Drum Set: drum bar differs from the drawing's reading" in line for line in report)
+    assert notes_of(root, "P1", "1")[0].find("grace") is not None
+
+
+def test_drum_signature_merges_a_run_of_rests_and_leaves_out_grace_notes():
+    def note(body: str, duration: int | None, voice: str = "1") -> str:
+        length = f"<duration>{duration}</duration>" if duration is not None else ""
+        return f"<note>{body}{length}<voice>{voice}</voice></note>"
+    snare = "<unpitched><display-step>C</display-step><display-octave>5</display-octave></unpitched>"
+    one = ET.fromstring("<measure>" + note(snare, 4) + note("<rest/>", 4) + note("<rest/>", 8) + "</measure>")
+    two = ET.fromstring("<measure>" + note("<grace/>" + snare, None) + note(snare, 4)
+                        + note('<rest/>', 12) + "</measure>")
+    assert drawing_check._drum_signature(one) == drawing_check._drum_signature(two)
 
 
 def test_bars_left_alone_are_not_touched(tmp_path):

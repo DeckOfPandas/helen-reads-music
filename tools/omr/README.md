@@ -76,10 +76,14 @@ reading adds up and differs from the score, it wins:
 - a fingered tremolo (two minims a beam's strokes apart, together lasting
   one) is written as one;
 - a drum bar is written from the drawing, voices as drawn, a voice the page
-  leaves without rests padded with invisible ones.
+  leaves without rests padded with invisible ones where its gaps are;
+- an octave clef's small 8 is drawn on every system and a read can miss it
+  on some: the clef gets the 8 the page shows, and the notes read under the
+  wrong clef move by the octave.
 
 A bar whose drawing does not add up (tuplets, grace notes) is reported, not
-changed. Text is drawn as shapes too, and not read: lyrics are what
+changed. Nor is a drum bar holding grace notes (flams): the drawing reads
+none, so it is compared and reported, never rewritten. Text is drawn as shapes too, and not read: lyrics are what
 Audiveris read. Bars patched by hand are left alone; after the patches they
 are checked against the drawing, which only adds ties it sees: a tie can
 hide from it behind another voice's notes, so it removes none. A scanned
@@ -96,6 +100,21 @@ music font (Leland, Bravura) rather than as shapes. Their codepoints name
 them, so they need no naming in `glyphs.json`, and `survey` shows only the
 shapes left. A drum kit written as one voice, stems either way, is read as
 one voice when splitting it by stem direction doesn't add up.
+
+A score printed from a web browser (Skia in the PDF's producer) outlines a
+whole page's symbols in a few filled paths. On such a page, where a path
+holds several outlines and spans more than a stave both ways, each outline
+(with the holes inside it) is a symbol of its own. Its fingerprint then
+varies by rounding a little from place to place: in `glyphs.json`, name
+the commonest of each shape and check the bars the report lists. Grace
+noteheads are smaller than ordinary ones: leave them `other`.
+
+Octave clefs (guitars, tenor voice, bass guitar) have their small 8 below.
+Where it is part of the clef's shape, name the shape `clef-treble-8vb` or
+`clef-bass-8vb`; where it is a shape of its own, name it `clef-8`. The
+pitches are then written as MusicXML writes them under an octave clef,
+sounding an octave below the plain clef's, so such a part needs no `8vb`
+in `"transpose"`.
 
 To check a bar by eye, `vector.py picture library/<piece> <page> <stave>
 <first bar> <last bar>` writes a PNG of it to `omr/views/bars/`.
@@ -193,6 +212,12 @@ Before changing a tool or `merge.json`, copy the merged score aside; after,
 `score.py diff <copy> <new>` lists every bar whose notes or marks (lyrics,
 articulations, noteheads, directions) changed.
 
+When only some of a full score's parts are wanted (the band's, not the
+singer's), read the whole score, so the drawing check can match every
+stave, then copy out the wanted parts:
+
+    python3 tools/omr/score.py extract omr/<piece>-merged.mxl omr/<piece>-band.musicxml "Lead Guitar" "Drum Set"
+
 ## The tools
 
 | File | Does |
@@ -204,7 +229,7 @@ articulations, noteheads, directions) changed.
 | `pagefix.py` | Puts right a page read with the wrong number of bars |
 | `pages.py` | `merge`, `images`, `rerender`, `split`, `svg`: getting pages into one readable PDF |
 | `tab.py` | Guitar tablature read from the drawing into MusicXML, with string and fret |
-| `score.py` | `check`, `names` and `diff` for any `.mxl` |
+| `score.py` | `check`, `names`, `diff` and `extract` for any `.mxl` |
 | `draft.py` | Drafts `merge.json` from a read |
 | `merge.py` | The merge, on its own |
 | `repair.py` | The repairs, on their own |

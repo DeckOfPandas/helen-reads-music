@@ -36,7 +36,10 @@ piece if it isn't obvious from what's there. Don't go looking outside
 `library/`. One part is one piece: every PDF in a folder is read as pages
 of one score, so a second instrument's part goes in its own folder. Keep
 your own pictures in `omr/views/`: an image beside the PDFs is read as a
-scanned page. SVG pages become PDFs with `pages.py svg`.
+scanned page. SVG pages become PDFs with `pages.py svg`. A score printed
+from a web browser draws a page's symbols as a few big paths; the
+drawing reader splits them (`tools/omr/README.md`, "Reading the PDF's own
+drawing").
 
 **Guitar tab** is not read by Audiveris: name the shapes (step 2), then
 `python3 tools/omr/tab.py library/<piece>` does the whole read
@@ -183,9 +186,14 @@ Say which of these you met.
 
 ## 7. Report to Helen
 
+When Helen wants only some of a full score's parts (the band's, say),
+read and check the whole score anyway, so every stave is matched, then
+write hers with `score.py extract` (`tools/omr/README.md`, "Checking what
+came out") to `omr/<piece>-<who>.musicxml`, and send only that file.
+
 Follow the end-of-work list in `CLAUDE.md`, and add:
 - where the merged score is: `omr/<piece>-merged.musicxml` is the one to
-  open in Sibelius;
+  open in Sibelius (or the extract, if she asked for some parts);
 - bars that don't add up (0, or which and why);
 - what the drawing check fixed;
 - every bar you checked by eye, and what you found;
@@ -206,6 +214,11 @@ Follow the end-of-work list in `CLAUDE.md`, and add:
 - **A green check is not a right score.** 0 bars that don't add up proves
   the rhythms fill the bars, not that the notes are right. The drawing check
   and your eye on the page are the proof.
+- **An octave clef is not a transposition.** A guitar, bass guitar or
+  tenor printed with a small 8 under its clef is already an octave down
+  in MusicXML; adding `8vb` in `"transpose"` puts it two down. Name the
+  8 (`clef-8`, or the clef shape that holds it) and let the drawing check
+  set every system's clef.
 - **Removing patches or changing a tool moves marks as well as notes.**
   `score.py diff` lists marks, lyrics and noteheads; check each one it
   lists on the page, not just the notes.

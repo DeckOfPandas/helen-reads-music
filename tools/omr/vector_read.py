@@ -100,16 +100,7 @@ class Curve:
         return self.right[0] - self.left[0]
 
 
-def _subpaths(items: list) -> list[list]:
-    """A path's pieces, split where one doesn't start where the last ended:
-    one path can draw several ties."""
-    parts: list[list] = []
-    for item in items:
-        if parts and abs(item[1].x - parts[-1][-1][-1].x) < 0.01 and abs(item[1].y - parts[-1][-1][-1].y) < 0.01:
-            parts[-1].append(item)
-        else:
-            parts.append([item])
-    return parts
+_subpaths = vector.subpaths
 
 
 def curves_on_page(pg) -> list[Curve]:
@@ -504,24 +495,40 @@ CLEF_BOTTOM_LINE = {("G", 2): ("E", 4), ("F", 4): ("G", 2), ("C", 3): ("F", 3), 
                     ("percussion", 3): ("E", 4), ("percussion", 2): ("E", 4)}
 
 
-def pitch_at(step: int, clef: tuple[str, int], octave_change: int = 0) -> tuple[str, int]:
-    """The diatonic note at a stave position under a clef."""
+def pitch_at(step: int, clef: tuple, octave_change: int = 0) -> tuple[str, int]:
+    """The diatonic note at a stave position under a clef: (sign, line),
+    or (sign, line, octave change) for a clef with an 8 below or above,
+    whose notes are an octave from the plain clef's, as MusicXML writes them."""
+    if len(clef) == 3:
+        octave_change += clef[2]
+        clef = clef[:2]
     name, octave = CLEF_BOTTOM_LINE.get(clef, ("E", 4))
     index = STEP_NAMES.index(name) + octave * 7 + step + octave_change * 7
     return STEP_NAMES[index % 7], index // 7
 
 
 CLEF_GLYPHS = {"clef-treble": ("G", 2), "clef-bass": ("F", 4), "clef-alto": ("C", 3),
-               "clef-percussion": ("percussion", 2)}
+               "clef-percussion": ("percussion", 2),
+               "clef-treble-8vb": ("G", 2, -1), "clef-bass-8vb": ("F", 4, -1)}
 
 
-def drawn_clef(page: vector.Page, stave_index: int) -> tuple[str, int] | None:
-    """The clef drawn at the start of a stave."""
+def drawn_clef(page: vector.Page, stave_index: int) -> tuple | None:
+    """The clef drawn at the start of a stave; with its octave change when
+    a small 8 drawn on its own (`clef-8`) sits under it (-1) or over it (+1)."""
     clefs = sorted((g for g in page.glyphs if g.stave == stave_index and g.name in CLEF_GLYPHS), key=lambda g: g.x0)
-    return CLEF_GLYPHS[clefs[0].name] if clefs else None
+    if not clefs:
+        return None
+    clef, found = clefs[0], CLEF_GLYPHS[clefs[0].name]
+    gap = page.staves[stave_index].gap
+    for eight in (g for g in page.glyphs if g.name == "clef-8" and clef.x0 - gap <= g.cx <= clef.x1 + gap):
+        if len(found) == 2 and -gap * 0.5 <= eight.y0 - clef.y1 <= gap:
+            return found + (-1,)
+        if len(found) == 2 and -gap * 0.5 <= clef.y0 - eight.y1 <= gap:
+            return found + (1,)
+    return found
 
 
-def spell(voices: dict[str, list[Event]], clef: tuple[str, int], fifths: int) -> None:
+def spell(voices: dict[str, list[Event]], clef: tuple, fifths: int) -> None:
     """Give every head its pitch (step letter, alteration, octave), from its
     stave position, the clef, the key and the bar's accidentals: a drawn
     accidental holds for later notes on the same line or space until the

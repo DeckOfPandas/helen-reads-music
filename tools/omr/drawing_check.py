@@ -436,8 +436,10 @@ def _drum_events(events: list[vector_read.Event], expected: Fraction) -> list[re
 
 def _pad(voices: dict[str, list[vector_read.Event]], expected: Fraction) -> dict[str, list[repair.DrumEvent]] | None:
     """Drum voices as DrumEvents; one voice the page leaves short (no rests
-    drawn) is padded with invisible rests, placed by matching its first
-    event's x to the other voice's onsets."""
+    drawn) is padded with invisible rests where its gaps are. Each of its
+    events starts either straight after the event before or at a later
+    onset of the other voice: whichever x, read off the other voice's
+    onsets, is nearest its own."""
     names = list(voices)
     full = {n: vector_read.span(voices[n]) == expected or
             (len(voices[n]) == 1 and voices[n][0].whole_bar) for n in names}
@@ -452,17 +454,26 @@ def _pad(voices: dict[str, list[vector_read.Event]], expected: Fraction) -> dict
     for event in voices[whole_voice]:
         onsets.append((event.x, t))
         t += event.length
-    first_x = voices[gap_voice][0].x if voices[gap_voice] else None
-    start = min(onsets, key=lambda o: abs(o[0] - first_x))[1] if first_x is not None and onsets else Fraction(0)
-    end = expected - start - vector_read.span(voices[gap_voice])
-    if end < 0:
+    def x_at(time: Fraction) -> float:
+        before = [o for o in onsets if o[1] <= time]
+        after = [o for o in onsets if o[1] > time]
+        if not before or not after:
+            return (before or after)[-1 if before else 0][0]
+        (x0, t0), (x1, t1) = before[-1], after[0]
+        return x0 + (x1 - x0) * float((time - t0) / (t1 - t0))
+
+    padded, t = [], Fraction(0)
+    for event, drum_event in zip(voices[gap_voice], out[gap_voice]):
+        starts = [t] + [o[1] for o in onsets if o[1] > t]
+        start = min(starts, key=lambda s: abs(x_at(s) - event.x)) if onsets else t
+        if start > t:
+            padded.append(repair.DrumEvent([], start - t, hidden=True))
+        padded.append(drum_event)
+        t = start + drum_event.length
+    if t > expected:
         return None
-    padded = []
-    if start:
-        padded.append(repair.DrumEvent([], start, hidden=True))
-    padded += out[gap_voice]
-    if end:
-        padded.append(repair.DrumEvent([], end, hidden=True))
+    if t < expected:
+        padded.append(repair.DrumEvent([], expected - t, hidden=True))
     out[gap_voice] = padded
     return out
 
@@ -527,6 +538,77 @@ def _fix_key(part: ET.Element, number: str, fifths: int) -> None:
         ET.SubElement(key, "fifths")
         repair._insert_in_order(attributes, key)
     key.find("fifths").text = str(fifths)
+
+
+def _leading_attributes(measure: ET.Element) -> list[ET.Element]:
+    """The measure's <attributes> before its first note."""
+    found = []
+    for child in measure:
+        if child.tag == "note":
+            break
+        if child.tag == "attributes":
+            found.append(child)
+    return found
+
+
+def _clef_in_force(part: ET.Element, number: str, staff: int) -> ET.Element | None:
+    """The clef of a staff at the start of bar `number`, a clef at the
+    bar's start included."""
+    clef = None
+    for measure in part.findall("measure"):
+        mine = _leading_attributes(measure) if measure.get("number") == number else measure.findall("attributes")
+        for attributes in mine:
+            for c in attributes.findall("clef"):
+                if int(c.get("number", "1")) == staff:
+                    clef = c
+        if measure.get("number") == number:
+            break
+    return clef
+
+
+def _clef_octave(clef: ET.Element) -> int:
+    return int(clef.findtext("clef-octave-change") or 0)
+
+
+def _fix_clef_octave(part: ET.Element, number: str, staff: int, octave: int) -> None:
+    """Give the staff's clef at bar `number` the drawn octave change, at
+    that bar: the clef there is changed, or a copy of the one in force is
+    set there. The notes it governs, read under the wrong clef, move by
+    the difference: each sits where it was drawn."""
+    shift = octave - _clef_octave(_clef_in_force(part, number, staff))
+    measures = part.findall("measure")
+    start = next(i for i, m in enumerate(measures) if m.get("number") == number)
+    for i, m in enumerate(measures[start:]):
+        stop = False
+        for child in m:
+            if child.tag == "attributes" and i > 0 and any(
+                    int(c.get("number", "1")) == staff for c in child.findall("clef")):
+                stop = True
+                break
+            if child.tag == "note" and int(child.findtext("staff") or 1) == staff and child.find("pitch") is not None:
+                child.find("pitch/octave").text = str(int(child.findtext("pitch/octave")) + shift)
+        if stop:
+            break
+    measure = measures[start]
+    clef = next((c for a in _leading_attributes(measure) for c in a.findall("clef")
+                 if int(c.get("number", "1")) == staff), None)
+    if clef is None:
+        clef = copy.deepcopy(_clef_in_force(part, number, staff))
+        attributes = next(iter(_leading_attributes(measure)), None)
+        if attributes is None:
+            attributes = ET.Element("attributes")
+            position = 0
+            while position < len(measure) and measure[position].tag == "print":
+                position += 1
+            measure.insert(position, attributes)
+        repair._insert_in_order(attributes, clef)
+    change = clef.find("clef-octave-change")
+    if octave == 0 and change is not None:
+        clef.remove(change)
+    elif octave != 0:
+        if change is None:
+            change = ET.SubElement(clef, "clef-octave-change")
+        change.text = str(octave)
 
 
 def _key_in_force(part: ET.Element, number: str) -> int:
@@ -670,13 +752,23 @@ def check(root: ET.Element, piece: Path, pdfs: list[Path], fix: bool = True,
             staves = _staves_of(part)
             states = dict(zip([m.get("number") for m in part.findall("measure")], merge.attribute_states(part)))
             measures = {m.get("number"): m for m in part.findall("measure")}
-            clef = vector_read.drawn_clef(page, stave) or ("G", 2)
+            drawn = vector_read.drawn_clef(page, stave)
+            clef = drawn or ("G", 2)
             keys = drawn_keys(page, stave) if not drums else []
             key_now = None
             for k, number in enumerate(bars):
                 measure = measures.get(number)
                 if measure is None:
                     continue
+                # An octave clef's 8 is drawn at every system; a read can miss it on some.
+                in_force = _clef_in_force(part, number, slot.staff) if k == 0 and drawn and not drums else None
+                if in_force is not None and (in_force.findtext("sign"), int(in_force.findtext("line") or 0)) == drawn[:2]:
+                    octave = drawn[2] if len(drawn) == 3 else 0
+                    if (only is None or (slot.part, number) in only) and _clef_octave(in_force) != octave:
+                        findings.append(Finding(page_number, number, slot.part, slot.staff,
+                                                f"clef octave drawn {octave}, score {_clef_octave(in_force)}", fix))
+                        if fix:
+                            _fix_clef_octave(part, number, slot.staff, octave)
                 if k < len(keys) and keys[k] is not None:
                     key_now = keys[k]
                 if only is not None and (slot.part, number) not in only:
@@ -722,12 +814,19 @@ def check(root: ET.Element, piece: Path, pdfs: list[Path], fix: bool = True,
                                 down = drum_voices["single"]
                             else:
                                 up = drum_voices["single"]
-                        if fix:
-                            before = copy.deepcopy(measure)
+                        drawn_bar = copy.deepcopy(measure)
+                        _rebuild(drawn_bar, [repair._drum_notes(up, "1", "up", divisions),
+                                             repair._drum_notes(down, "2", "down", divisions)], divisions)
+                        # The drawing reads no grace notes (flams): a bar holding some, or a
+                        # hand-patched bar, is compared, never rewritten.
+                        if only is not None or measure.find("note/grace") is not None:
+                            if _drum_signature(drawn_bar) != _drum_signature(measure):
+                                findings.append(Finding(page_number, number, slot.part, slot.staff,
+                                                        "drum bar differs from the drawing's reading"))
+                        elif fix and ET.tostring(drawn_bar) != ET.tostring(measure):
                             _rebuild(measure, [repair._drum_notes(up, "1", "up", divisions),
                                                repair._drum_notes(down, "2", "down", divisions)], divisions)
-                            if ET.tostring(before) != ET.tostring(measure):
-                                counts["drum bars written"] += 1
+                            counts["drum bars written"] += 1
                     else:
                         if _distance(drawn_counts[stave][k], read_counts):
                             findings.append(Finding(page_number, number, slot.part, slot.staff,
@@ -782,6 +881,28 @@ def check(root: ET.Element, piece: Path, pdfs: list[Path], fix: bool = True,
     report += ["", "drawn staves matched to parts (stave numbers from the top of the page, from 0):"]
     report += [f"  {line}" for line in layout]
     return findings, report
+
+
+def _drum_signature(measure: ET.Element) -> list[tuple]:
+    """A drum bar's notes and rests as (voice, heads, length), in time order
+    per voice, chords sorted; grace notes left out, and a run of rests one
+    rest (a gap may be written as one rest or several)."""
+    voices: dict[str, list[list]] = defaultdict(list)
+    for note in measure.findall("note"):
+        if note.find("grace") is not None:
+            continue
+        voice = note.findtext("voice") or "1"
+        length = int(note.findtext("duration") or 0)
+        head = ("rest",) if note.find("rest") is not None else (
+            note.findtext("unpitched/display-step"), note.findtext("unpitched/display-octave"),
+            note.findtext("notehead") or "normal")
+        if note.find("chord") is not None and voices[voice]:
+            voices[voice][-1][0].append(head)
+        elif head == ("rest",) and voices[voice] and voices[voice][-1][0] == [("rest",)]:
+            voices[voice][-1][1] += length
+        else:
+            voices[voice].append([[head], length])
+    return [(voice, tuple(sorted(heads)), length) for voice in sorted(voices) for heads, length in voices[voice]]
 
 
 def _count_diff(drawn: Counter, read: Counter) -> str:

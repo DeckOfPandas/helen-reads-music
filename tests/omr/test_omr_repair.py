@@ -173,6 +173,15 @@ def test_octave_clefs_are_kept_unless_the_table_says_there_are_none():
     assert root.find(".//clef-octave-change") is not None
 
 
+def test_a_bass_guitar_reaches_down_to_its_open_e():
+    # Under its octave clef MusicXML holds a bass guitar at sounding pitch: open E is E1.
+    bars = [bar(four_crotchets("E1"), 1, attributes(clef="F", line=4)), bar(four_crotchets("D1"), 2)]
+    root = build([("P1", "Bass Guitar", part("P1", bars)), ("P2", "Double Bass", part("P2", bars))])
+    guitar, double_bass = root.findall("part")
+    assert score.below_range(guitar, "Bass Guitar") == ["2"]
+    assert score.below_range(double_bass, "Double Bass") == ["1", "2"]
+
+
 def test_range_check_names_the_bars():
     bars = [bar(four_crotchets("G3"), 1, octave_low("")), bar(four_crotchets("F3"), 2)]
     root = build([("P1", "Violin II", part("P1", bars)), ("P2", "Marimba", part("P2", bars))])
@@ -680,6 +689,19 @@ def test_a_patch_inserts_a_tied_note_with_its_lyric():
     assert g.find("tie").get("type") == "start" and g.find("notations/tied").get("type") == "start"
     assert g.findtext("lyric/text") == "Yeah,"
     assert [c.tag for c in g] == ["pitch", "duration", "tie", "voice", "type", "notations", "lyric"]
+
+
+def test_a_patch_inserts_a_grace_note_that_takes_no_time():
+    # Guitar: a slashed grace C5 before the third crotchet, which Audiveris dropped.
+    root = build([_timed_part("P1", "Lead Guitar", [("E5", 1), ("D5", 1), ("D5", 1), ("C5", 1)])])
+    repair.apply_patches(root, {"Lead Guitar": {"1": "1 1 +C5:g 1 1"}})
+    notes = root.find("part/measure").findall("note")
+    grace = notes[2]
+    assert grace.findtext("pitch/step") == "C" and grace.find("duration") is None
+    assert grace.find("grace").get("slash") == "yes" and grace.findtext("type") == "eighth"
+    assert [c.tag for c in grace][:2] == ["grace", "pitch"]
+    assert notes[3].findtext("pitch/step") == "D"
+    assert score.bad_bars(root.find("part")) == []
 
 
 def test_a_patch_can_tie_from_the_bar_before_and_spell_accidentals():
