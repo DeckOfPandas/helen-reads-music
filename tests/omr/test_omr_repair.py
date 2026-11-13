@@ -371,6 +371,41 @@ def test_a_flam_and_a_roll():
     assert score.bad_bars(root.find("part")) == []
 
 
+def test_closed_and_let_ring_heads_staccato_cue_and_hidden_rest():
+    root = build([("P1", "Drum Set", f'<part id="P1">{drum_bar(1, KICK_ONLY, True)}</part>')])
+    repair.apply_patches(root, {"Drum Set": {"1": {"up": "cxG5:1 xA5:1>l C5:1.q r:1h"}}})
+    notes = root.find("part/measure").findall("note")
+    assert notes[0].find("notations/technical/stopped") is not None
+    assert notes[1].find("notations/tied").get("type") == "let-ring" and notes[1].find("tie") is None
+    assert notes[2].find("notations/articulations/staccato") is not None
+    assert list(notes[2])[0].tag == "cue"                       # before <unpitched>, as MusicXML orders it
+    assert notes[3].get("print-object") == "no"
+    assert score.bad_bars(root.find("part")) == []
+
+
+def test_pitched_notes_and_a_fingered_tremolo():
+    """A percussionist's part that turns to timpani or xylophone holds real
+    pitches; two notes in a fingered tremolo each print at twice their
+    length."""
+    events = repair.parse_groove_voice("pF#3:1 pBb2:1 E5:1t A4:1")
+    assert events[0].heads[0].pitched and events[0].heads[0].alter == 1 and events[1].heads[0].alter == -1
+    root = build([("P1", "Drum Set", f'<part id="P1">{drum_bar(1, KICK_ONLY, True)}</part>')])
+    repair.apply_patches(root, {"Drum Set": {"1": {"up": "pF#3:1 pBb2:1 E5:1>t A4:1"}}})
+    notes = root.find("part/measure").findall("note")
+    assert notes[0].findtext("pitch/step") == "F" and notes[0].findtext("pitch/alter") == "1"
+    assert notes[0].findtext("accidental") == "sharp" and notes[0].find("stem") is None
+    assert [n.find("notations/ornaments/tremolo").get("type") for n in notes[2:]] == ["start", "stop"]
+    assert [n.findtext("type") for n in notes[2:]] == ["half", "half"]
+    assert notes[2].findtext("time-modification/actual-notes") == "2"
+    assert score.bad_bars(root.find("part")) == []
+
+
+@pytest.mark.parametrize("token", ["C#5:1", "xG5:1h", "C5:1t", "C5:gt"])
+def test_marks_that_do_not_fit_their_note_are_refused(token):
+    with pytest.raises(ValueError):
+        repair.parse_groove_voice(token)
+
+
 @pytest.mark.parametrize("token", ["C5:0", "r:g", "C5:-1"])
 def test_drum_tokens_with_no_sounding_length_are_refused(token):
     with pytest.raises(ValueError):

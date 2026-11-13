@@ -258,6 +258,13 @@ repeated, so transcribing it by eye is a few hours' work, not days:
 - Build `"drum_grooves"` from it: each distinct bar once, with its
   `"bars"` list, and the cues ("closed hat", "Fill", "Cowbell") and
   dynamics in `"marks"`.
+- When Helen wants only the percussion staves of a poor scan, skip
+  Audiveris: write the transcription as `transcription.json` and build
+  the parts with `transcribed.py` (`tools/omr/README.md`, "Percussion
+  from a poor scan, by eye"). Cut the two staves out of each page with
+  the bar numbers under them, and zoom on any bar denser than slashes.
+  Check a pitched passage (timpani, xylophone) against the instruments
+  that double it on the same page.
 - A stave space on a 117 DPI scan is under 5 px, so a head's position
   is uncertain by a step. Where the page names the instrument, use one
   position per instrument and give it its sound in `"drum_key"`.

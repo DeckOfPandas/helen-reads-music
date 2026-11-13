@@ -146,6 +146,24 @@ doesn't add up. Tuplets, grace notes, bends and slides are not read.
 An SVG page becomes a PDF with `pages.py svg <page.svg> <out.pdf>`, still a
 drawing.
 
+## Percussion from a poor scan, by eye
+
+On a poor scan (stave spaces of 5 px or less) Audiveris reads almost
+nothing of a drum or percussion stave, and there is no drawing to check it
+against. When only those parts are wanted, transcribe them by eye into
+`library/<piece>/transcription.json` and build the score from that alone:
+
+    python3 tools/omr/transcribed.py library/<piece>/transcription.json library/<piece>/omr/<piece>-<who>.musicxml
+
+Each part has a `kit` (its instruments' names, each with a stave position
+and General MIDI drum sound), its `grooves`, its `bars` (a groove, or
+voices in the `drum_grooves` syntax with the kit's names) and its `marks`.
+`pitched` and `clef` cover a percussionist who turns to timpani or
+xylophone. `transcribed.py --help` has the format. The sound follows the
+name, so a cowbell and a hi-hat drawn on one line still sound apart. It
+refuses a bar that doesn't add up, naming it, and runs `score.py check`
+on what it writes.
+
 ## Doublings
 
 Parts that play the same notes (harp and piano, bass guitar and double
@@ -229,6 +247,7 @@ stave, then copy out the wanted parts:
 | `pagefix.py` | Puts right a page read with the wrong number of bars |
 | `pages.py` | `merge`, `images`, `rerender`, `split`, `svg`: getting pages into one readable PDF |
 | `tab.py` | Guitar tablature read from the drawing into MusicXML, with string and fret |
+| `transcribed.py` | A percussion score built from a transcription by eye, for a scan too poor to read |
 | `score.py` | `check`, `names`, `diff` and `extract` for any `.mxl` |
 | `draft.py` | Drafts `merge.json` from a read |
 | `merge.py` | The merge, on its own |
