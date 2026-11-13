@@ -44,7 +44,8 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
-LINE_WIDTH_STEM_MAX = 0.42          # stems are thinner than bar lines (0.37 vs 0.47 here)
+LINE_WIDTH_STEM_MAX = 0.42          # the least stem width allowed for: stems are thinner than bar lines
+_STEM_WIDTHS: dict[tuple[str, int], float] = {}     # (pdf path, mtime) -> stem_width
 
 
 @dataclass
@@ -113,9 +114,29 @@ class Page:
     glyphs: list[Glyph]
     stems: list[Stem]
     ledgers: list[tuple[float, float, float]] = field(default_factory=list)   # (x0, x1, y)
+    verticals: list[tuple[float, float, float]] = field(default_factory=list)  # (x, y0, y1), thicker than stems
 
     def bar_count(self, stave: int) -> int:
         return max(len(self.bar_lines[stave]) - 1, 0)
+
+    def systems(self, staves_in_score: int) -> list[list[int]]:
+        """The page's staves, grouped into systems, top to bottom. A page with
+        no more staves than the score has is one system (a full score hides
+        empty staves). Otherwise adjacent staves are one system where a bar
+        line runs from one into the other, as a grand stave's do."""
+        indexes = list(range(len(self.staves)))
+        if len(self.staves) <= staves_in_score:
+            return [indexes] if indexes else []
+        groups = [[0]]
+        for upper, lower in zip(self.staves, self.staves[1:]):
+            joined = any(y0 <= upper.bottom + 0.5 and y1 >= lower.top - 0.5 and
+                         max(upper.left, lower.left) - 1 <= x <= min(upper.right, lower.right) + 1
+                         for x, y0, y1 in self.verticals)
+            if joined:
+                groups[-1].append(groups[-1][-1] + 1)
+            else:
+                groups.append([groups[-1][-1] + 1])
+        return groups
 
 
 def fingerprint(drawing: dict) -> str:
@@ -155,9 +176,54 @@ def _staves(horizontals: list[tuple[float, float, float]]) -> list[Stave]:
     return sorted(staves, key=lambda s: s.top)
 
 
+def _vertical_ends(page, touching: Counter, total: Counter) -> None:
+    """Per vertical stroke width, how many strokes there are, and how many
+    end against the side of a filled shape (a notehead or a beam)."""
+    drawings = page.get_drawings()
+    sides: dict[int, list] = defaultdict(list)
+    for d in drawings:
+        if d.get("fill") is not None:
+            r = d["rect"]
+            sides[int(r.x0)].append((r.x0, r))
+            sides[int(r.x1)].append((r.x1, r))
+    for d in drawings:
+        if d.get("fill") is not None:
+            continue
+        width = round(d.get("width") or 0, 3)
+        for item in d["items"]:
+            p, q = item[1], item[-1]
+            if item[0] != "l" or abs(p.x - q.x) >= 0.05 or abs(p.y - q.y) <= 3:
+                continue
+            total[width] += 1
+            near = [r for k in (int(p.x) - 1, int(p.x), int(p.x) + 1) for x, r in sides[k] if abs(x - p.x) < 0.6]
+            if any(r.y0 - 1 <= y <= r.y1 + 1 for r in near for y in (p.y, q.y)):
+                touching[width] += 1
+
+
+def stem_width(doc) -> float:
+    """The widest stroke that is a stem: the widest vertical stroke width
+    of which most strokes in the document end against a notehead or beam
+    (a bar line ends at a stave's edge), never less than
+    LINE_WIDTH_STEM_MAX. Software draws stems from 0.35 to 0.6 pt."""
+    path = Path(doc.name) if doc.name else None
+    key = (str(path), path.stat().st_mtime_ns) if path and path.is_file() else None
+    if key is not None and key in _STEM_WIDTHS:
+        return _STEM_WIDTHS[key]
+    touching: Counter = Counter()
+    total: Counter = Counter()
+    for page in doc:
+        _vertical_ends(page, touching, total)
+    stems = [w for w in total if touching[w] * 2 > total[w]]
+    width = max([LINE_WIDTH_STEM_MAX, *(w + 0.001 for w in stems)])
+    if key is not None:
+        _STEM_WIDTHS[key] = width
+    return width
+
+
 def read_page(page) -> Page:
     """Everything this module finds on one pymupdf page."""
     drawings = page.get_drawings()
+    stem_max = stem_width(page.parent) if page.parent is not None else LINE_WIDTH_STEM_MAX
     horizontals, verticals, stems, ledgers = [], [], [], []
     filled = []
     for d in drawings:
@@ -177,7 +243,7 @@ def read_page(page) -> Page:
                     ledgers.append((min(p.x, q.x), max(p.x, q.x), p.y))
             elif abs(p.x - q.x) < 0.05 and abs(p.y - q.y) > 3:
                 y0, y1 = min(p.y, q.y), max(p.y, q.y)
-                if width <= LINE_WIDTH_STEM_MAX:
+                if width <= stem_max:
                     stems.append(Stem(p.x, y0, y1))
                 else:
                     verticals.append((p.x, y0, y1))
@@ -199,7 +265,7 @@ def read_page(page) -> Page:
     for d in filled:
         r = d["rect"]
         glyphs.append(Glyph(fingerprint(d), r.x0, r.y0, r.x1, r.y1))
-    result = Page(staves, bar_lines, glyphs, stems, ledgers)
+    result = Page(staves, bar_lines, glyphs, stems, ledgers, verticals)
     for glyph in glyphs:
         _place_glyph(result, glyph)
     return result
@@ -392,6 +458,17 @@ def piece_pdfs(piece: Path) -> list[Path]:
     return sorted((p for p in piece.iterdir() if p.suffix.lower() == ".pdf"), key=pages.page_order)
 
 
+def pdf_pages(pdfs: list[Path]) -> list[tuple[Path, int]]:
+    """Every page of the PDFs in order, as (pdf, page index in it): page N of
+    a piece, counted from 1, is entry N - 1."""
+    import pymupdf
+    result = []
+    for pdf in pdfs:
+        with pymupdf.open(pdf) as doc:
+            result += [(pdf, index) for index in range(doc.page_count)]
+    return result
+
+
 def main(argv: list[str]) -> int:
     if len(argv) >= 2 and argv[0] == "survey":
         piece = Path(argv[1])
@@ -406,9 +483,9 @@ def main(argv: list[str]) -> int:
     if len(argv) == 3 and argv[0] == "show":
         import pymupdf
         piece = Path(argv[1])
-        pdf = piece_pdfs(piece)[int(argv[2]) - 1]
+        pdf, index = pdf_pages(piece_pdfs(piece))[int(argv[2]) - 1]
         with pymupdf.open(pdf) as doc:
-            page = read_page(doc[0])
+            page = read_page(doc[index])
         name_glyphs(page, load_catalogue(piece))
         for index, stave in enumerate(page.staves):
             counts = Counter(g.name for g in page.glyphs if g.stave == index)
@@ -428,16 +505,16 @@ def picture(piece: Path, page_number: int, stave_index: int, first: int, last: i
     lyrics, written to library/<piece>/omr/views/bars/."""
     import pymupdf
     last = first if last is None else last
-    pdf = piece_pdfs(piece)[page_number - 1]
+    pdf, index = pdf_pages(piece_pdfs(piece))[page_number - 1]
     out = piece / "omr" / "views" / "bars" / f"page{page_number}-stave{stave_index}-bars{first}-{last}.png"
     out.parent.mkdir(parents=True, exist_ok=True)
     with pymupdf.open(pdf) as doc:
-        page = read_page(doc[0])
+        page = read_page(doc[index])
         stave = page.staves[stave_index]
         lines = page.bar_lines[stave_index]
         clip = pymupdf.Rect(lines[first] - 4, stave.top - stave.gap * 7, lines[min(last + 1, len(lines) - 1)] + 4,
                             stave.bottom + stave.gap * 7)
-        doc[0].get_pixmap(clip=clip, dpi=400).save(out)
+        doc[index].get_pixmap(clip=clip, dpi=400).save(out)
     return out
 
 

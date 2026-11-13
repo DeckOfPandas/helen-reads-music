@@ -26,7 +26,8 @@ vector_read.py). For every page:
    counts differ, the bar is reported for checking by eye.
 
 The notes of bars named in `skip` (hand patches) are left alone; `only`
-checks just those, after the patches, correcting nothing but ties.
+checks just those, after the patches, adding the ties drawn and removing
+none (a tie can hide from the drawing behind another voice's notes).
 """
 from __future__ import annotations
 
@@ -120,7 +121,8 @@ def _match_staves(drawn: list[list[Counter]], slots: list[Slot], bars: list[str]
     least total count difference."""
     big = 10 ** 9
     n, m = len(drawn), len(slots)
-    cost = [[sum(_distance(drawn[i][k], slots[j].bars.get(b, Counter())) for k, b in enumerate(bars))
+    cost = [[sum(_distance(drawn[i][k] if k < len(drawn[i]) else Counter(), slots[j].bars.get(b, Counter()))
+                 for k, b in enumerate(bars))
              for j in range(m)] for i in range(n)]
     best = [[big] * (m + 1) for _ in range(n + 1)]
     back: list[list[tuple[int, int] | None]] = [[None] * (m + 1) for _ in range(n + 1)]
@@ -305,8 +307,9 @@ def _strip_ties(voices: list[tuple]) -> list[tuple]:
     return sorted(tuple((length, tuple(p for p, _ in heads)) for length, heads in v) for v in voices)
 
 
-def _set_ties(measure: ET.Element, staff: int, staves: int, drawn: list[tuple]) -> None:
-    """Make the staff's ties those drawn, the notes otherwise matching."""
+def _set_ties(measure: ET.Element, staff: int, staves: int, drawn: list[tuple], keep: bool = False) -> None:
+    """Make the staff's ties those drawn, the notes otherwise matching; with
+    `keep` (a bar patched by hand), add the drawn ties and keep its own."""
     voices: dict[str, list[list[ET.Element]]] = defaultdict(list)
     for note in measure.findall("note"):
         if note.find("grace") is not None or (staves > 1 and int(note.findtext("staff") or 1) != staff):
@@ -328,12 +331,13 @@ def _set_ties(measure: ET.Element, staff: int, staves: int, drawn: list[tuple]) 
         for chord, (_, heads) in zip(events, match):
             pitched = sorted((n for n in chord if n.find("pitch") is not None), key=score.midi)
             for note, (_, tie) in zip(pitched, heads):
+                had = {old.get("type") for old in note.findall("tie")} if keep else set()
                 for old in note.findall("tie"):
                     note.remove(old)
                 for notations in note.findall("notations"):
                     for old in notations.findall("tied"):
                         notations.remove(old)
-                kinds = (["stop"] if "<" in tie else []) + (["start"] if ">" in tie else [])
+                kinds = [kind for kind, mark in (("stop", "<"), ("start", ">")) if mark in tie or kind in had]
                 for kind in kinds:
                     repair._place(note, ET.Element("tie", {"type": kind}))
                 if kinds:
@@ -480,8 +484,11 @@ def drawn_keys(page: vector.Page, stave_index: int) -> list[int | None]:
     music = [g for g in mine if g.name in NOTEHEADS or g.name.startswith("rest")]
     clefs = sorted((g for g in mine if g.name.startswith("clef")), key=lambda g: g.x0)
 
+    owned = {id(sign) for sign in vector_read.accidentals_of(
+        heads, [g for g in mine if g.name in vector_read.ACCIDENTALS], gap).values()}
+
     def on_a_note(sign: vector.Glyph) -> bool:
-        return any(0 <= h.x0 - sign.x1 < gap * 1.6 and abs(h.cy - sign.cy) < gap * 0.75 for h in heads)
+        return id(sign) in owned
 
     keys: list[int | None] = []
     for k in range(page.bar_count(stave_index)):
@@ -630,9 +637,10 @@ def check(root: ET.Element, piece: Path, pdfs: list[Path], fix: bool = True,
     layout = []
     counts = Counter()
     first = 0
-    for page_number, pdf in enumerate(pdfs, start=1):
+    systems = []                                    # (page number, page, beams, curves, staves of one system)
+    for page_number, (pdf, index) in enumerate(vector.pdf_pages(pdfs), start=1):
         with pymupdf.open(pdf) as doc:
-            pg = doc[0]
+            pg = doc[index]
             page = vector.read_page(pg)
             beams = vector_read.beams_on_page(pg)
             curves = vector_read.curves_on_page(pg)
@@ -640,17 +648,19 @@ def check(root: ET.Element, piece: Path, pdfs: list[Path], fix: bool = True,
             notes_lines.append(f"page {page_number}: no staves drawn (a scan?)")
             continue
         vector.name_glyphs(page, catalogue)
-        count = page.bar_count(0)
+        systems += [(page_number, page, beams, curves, system) for system in page.systems(len(slots))]
+    for page_number, page, beams, curves, system in systems:
+        count = page.bar_count(system[0])
         bars = numbers[first:first + count]
         first += count
         if not bars:
             break
-        drawn_counts = [_drawn_counts(page, s) for s in range(len(page.staves))]
-        mapping = _match_staves(drawn_counts, slots, bars)
+        drawn_counts = {s: _drawn_counts(page, s) for s in system}
+        mapping = dict(zip(system, _match_staves([drawn_counts[s] for s in system], slots, bars)))
         layout.append(f"page {page_number} (bars {bars[0]}-{bars[-1]}): " + ", ".join(
             f"{stave}={slots[j].part}" + (f"/{slots[j].staff}" if _staves_of(parts[slots[j].part]) > 1 else "")
-            for stave, j in enumerate(mapping) if j is not None))
-        for stave, slot_index in enumerate(mapping):
+            for stave, j in mapping.items() if j is not None))
+        for stave, slot_index in mapping.items():
             if slot_index is None:
                 notes_lines.append(f"page {page_number}: stave {stave} matched to no part")
                 continue
@@ -736,9 +746,9 @@ def check(root: ET.Element, piece: Path, pdfs: list[Path], fix: bool = True,
                 if not fix:
                     continue
                 if _strip_ties(mine) == _strip_ties(theirs):
-                    _set_ties(measure, slot.staff, staves, mine)
+                    _set_ties(measure, slot.staff, staves, mine, keep=only is not None)
                     finding.fixed = True
-                    finding.what += "; ties set as drawn"
+                    finding.what += "; drawn ties added" if only is not None else "; ties set as drawn"
                     counts["ties"] += 1
                     continue
                 if only is not None:

@@ -341,7 +341,7 @@ def drawing_pass(root: score.ET.Element, piece: Path, table: dict, assume_time,
                  patched_only: bool = False) -> list[str]:
     """Check and correct the score against the PDFs' own drawing
     (drawing_check.py), leaving the bars merge.json patches by hand alone;
-    or, `patched_only`, check just those bars, correcting only their ties.
+    or, `patched_only`, check just those bars, only adding the ties drawn.
     Report lines."""
     import drawing_check
     import vector
@@ -356,7 +356,7 @@ def drawing_pass(root: score.ET.Element, piece: Path, table: dict, assume_time,
     if patched_only:
         findings, _ = drawing_check.check(root, piece, pdfs, fix=True, assume=assume_time, only=skip)
         return [f"hand patches checked against the drawing: {len(findings)} disagree, "
-                f"{sum(f.fixed for f in findings)} in their ties only (set as drawn)",
+                f"{sum(f.fixed for f in findings)} in their ties only (drawn ties added, the patch's kept)",
                 *(f"  {f.describe()}" for f in findings)]
     _, report = drawing_check.check(root, piece, pdfs, fix=True, assume=assume_time, skip=skip)
     return report

@@ -13,7 +13,7 @@ Built on vector.py's staves, stems and named glyphs. For a bar it finds:
   flags      flag glyphs at a stem's far end
   rests      by glyph; a whole/half rest rectangle is a whole rest when it
              hangs from a line, a half rest when it sits on one
-  dots       augmentation dots just right of a head
+  dots       augmentation dots just right of a head, one or a row
   marks      accent, marcato, tenuto, staccato and the open circle, beside
              a head on its stem's far side or near side
 
@@ -38,6 +38,40 @@ RESTS = {"rest-quarter": Fraction(1), "rest-eighth": Fraction(1, 2), "rest-16th"
 FLAGS = {"flag-8th-up": 1, "flag-8th-down": 1, "flag-16th-up": 2, "flag-16th-down": 2}
 MARKS = {"accent": "accent", "marcato": "strong", "tenuto": "tenuto", "dot-small": "staccato", "open": "open"}
 ACCIDENTALS = {"flat": -1, "sharp": 1, "natural": 0}
+FLAT_BULB = 0.7                     # a flat's note is this many spaces above the flat's foot
+
+
+def accidental_y(sign: vector.Glyph, gap: float) -> float:
+    """The height of the line or space an accidental is drawn for: a sharp
+    or natural is centred on it; a flat's stem rises above its bulb."""
+    return sign.y1 - gap * FLAT_BULB if sign.name == "flat" else sign.cy
+
+
+def accidentals_of(heads: list[vector.Glyph], signs: list[vector.Glyph], gap: float) -> dict[int, vector.Glyph]:
+    """Which accidental each head has, by id(head). An accidental is its
+    note's: the nearest head to its right on its line or space, reached
+    within 1.6 spaces, or across a chord's stacked columns of accidentals
+    with no wider opening than 0.8 spaces. A sign no head claims is a key's."""
+    def reaches(sign, head) -> bool:
+        edge = sign.x1
+        while head.x0 - edge >= gap * 1.6:
+            bridge = [s for s in signs if s is not sign and -gap * 0.2 <= s.x0 - edge < gap * 0.8
+                      and s.x1 > edge and s.x1 <= head.x0]
+            if not bridge:
+                return False
+            edge = max(s.x1 for s in bridge)
+        return True
+
+    owner: dict[int, vector.Glyph] = {}
+    for sign in signs:
+        y = accidental_y(sign, gap)
+        row = sorted((h for h in heads if h.x0 - sign.x1 >= 0 and abs(h.cy - y) < gap * 0.3), key=lambda h: h.x0)
+        if not row or not reaches(sign, row[0]):
+            continue
+        head = row[0]
+        if id(head) not in owner or sign.x1 > owner[id(head)].x1:
+            owner[id(head)] = sign
+    return owner
 
 
 @dataclass
@@ -65,17 +99,17 @@ class Curve:
 
 
 def curves_on_page(pg) -> list[Curve]:
-    """Long, low filled paths drawn mostly with curves: ties and slurs."""
+    """Long, low filled paths, at least half their pieces curves: ties and slurs."""
     curves = []
     for d in pg.get_drawings():
         if d.get("fill") is None:
             continue
         items = d["items"]
         kinds = [item[0] for item in items]
-        if kinds.count("c") < 2 or any(k not in ("c", "l") for k in kinds) or kinds.count("c") < len(kinds) * 0.6:
+        if kinds.count("c") < 2 or any(k not in ("c", "l") for k in kinds) or kinds.count("c") < len(kinds) * 0.5:
             continue
         r = d["rect"]
-        if r.width < 2.5 or r.height > r.width * 0.6:
+        if r.width < 2.5 or r.height > r.width * 0.45:                 # a whole note is squat, a tie flat
             continue
         points = [p for item in items for p in item[1:]]
         left = min(points, key=lambda p: p.x)
@@ -187,11 +221,11 @@ def read_bar(page: vector.Page, beams: list[Beam], stave_index: int, bar: int,
 
     chords: dict[int, Event] = {}
     loose: list[Event] = []
+    owners = accidentals_of(heads, accidentals, gap)
     for glyph in heads:
         head = Head(round(stave.step(glyph.cy)), HEADS[glyph.name], glyph.cx, glyph.cy, left=glyph.x0)
-        before = [a for a in accidentals if 0 < glyph.x0 - a.x1 < gap * 1.6 and abs(a.cy - glyph.cy) < gap * 0.7]
-        if before:
-            head.accidental = ACCIDENTALS[min(before, key=lambda a: glyph.x0 - a.x1).name]
+        if id(glyph) in owners:
+            head.accidental = ACCIDENTALS[owners[id(glyph)].name]
         attached = _attach_stem(glyph, stems, gap) if head.kind in ("black", "half", "x") else None
         if attached is None:
             length = {"whole": Fraction(4), "slash": Fraction(1)}.get(head.kind)
@@ -238,10 +272,9 @@ def read_bar(page: vector.Page, beams: list[Beam], stave_index: int, bar: int,
                 if glyph.name == "dot-small" and any(abs(glyph.cy - h.y) < gap * 0.6 for h in event.heads):
                     continue                                    # beside, not above: not staccato
                 event.marks.add(MARKS[glyph.name])
-        dots = [g for g in glyphs if g.name == "dot" and any(0 < g.x0 - (h.x + gap * 0.6) < gap * 1.6
-                                                              and abs(g.cy - h.y) < gap * 0.8 for h in event.heads)]
-        if dots:
-            event.length = event.length * Fraction(3, 2)
+        count = max((_dots_after(h, glyphs, gap) for h in event.heads), default=0)
+        if count:
+            event.length = event.length * (2 - Fraction(1, 2 ** count))
 
     rests = []
     for glyph in glyphs:
@@ -268,6 +301,24 @@ def read_bar(page: vector.Page, beams: list[Beam], stave_index: int, bar: int,
         if tremolo:
             voices = {"single": tremolo}
     return voices
+
+
+def _dots_after(head: Head, glyphs: list[vector.Glyph], gap: float) -> int:
+    """How many augmentation dots follow a head: the first right of it
+    within 2.5 spaces (a chord's dots line up, some pushed out) with no
+    other notehead between, each further one close after the last, in a row."""
+    dots = [g for g in glyphs if g.name == "dot"]
+    heads = [g for g in glyphs if g.name in HEADS]
+    first = [g for g in dots if 0 < g.x0 - (head.x + gap * 0.6) < gap * 2.5 and abs(g.cy - head.y) < gap * 0.8
+             and not any(head.x + gap * 0.6 < h.cx < g.x0 for h in heads)]
+    if not first:
+        return 0
+    last, count = min(first, key=lambda g: g.x0), 1
+    while True:
+        after = [g for g in dots if 0 < g.x0 - last.x1 < gap and abs(g.cy - last.cy) < gap * 0.3]
+        if not after:
+            return count
+        last, count = min(after, key=lambda g: g.x0), count + 1
 
 
 def _find_ties(heads: list[Head], elsewhere: list[Head], curves: list[Curve], gap: float,
@@ -304,8 +355,9 @@ def _find_ties(heads: list[Head], elsewhere: list[Head], curves: list[Curve], ga
             continue
         if curve.width >= gap * 6:
             continue
+        found = start if start is not None else end
         between = [h for h in everything if curve.left[0] - near < h.x < curve.right[0] + near
-                   and h is not start and h is not end]
+                   and abs(h.x - found.x) > gap * 0.5]                 # not its own chord
         if between:
             continue
         if mine_start:

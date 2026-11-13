@@ -1696,6 +1696,7 @@ def apply_patches(root: ET.Element, patches: dict, assume: Fraction | None = Non
         {"notes": "D6:1/2 r:1/2 Bb5:2"}  the voice's notes replaced outright, the
                                     other voices dropped
         {"up": "...", "down": "...", "up2": "..."}  a drum bar replaced, as a drum groove
+        [<patch>, <patch>]          several, in order: one voice each
     Pitches as Bb4, F#5, Bn4; x before the step for an x notehead; ~ before it
     for a tie from the note before, ~ after the length to tie on; @text after
     for a lyric; A/B:len for a fingered tremolo (chord A alternating with
@@ -1711,47 +1712,51 @@ def apply_patches(root: ET.Element, patches: dict, assume: Fraction | None = Non
         part = next(p for p in root.findall("part") if p.get("id") == names[part_name])
         states = merge.attribute_states(part)
         by_number = {m.get("number"): (m, s) for m, s in zip(part.findall("measure"), states)}
-        for number, patch in bars.items():
+        for number, patch_list in bars.items():
             if number.startswith("_"):
                 continue
             if number not in by_number:
                 raise ValueError(f"{part_name} has no bar {number}")
             measure, state = by_number[number]
-            divisions = _divisions(measure, state)
-            if isinstance(patch, str):
-                patch = {"edit": patch}
-            first = measure.find("note")
-            voice = patch.get("voice") or (first.findtext("voice") if first is not None else None) or "1"
-            staff = patch.get("staff") or (first.findtext("staff") if first is not None else None)
-            drum = any(key in patch for key, _, _ in DRUM_VOICES)
-            try:
-                if drum:
-                    voices = [parse_groove_voice(patch.get(key, "")) for key, _, _ in DRUM_VOICES]
-                    _fit_divisions(part, voices)
-                    divisions = _divisions(measure, state)
-                    _write_drum_voices(measure, *voices[:2], divisions, voices[2])
-                elif "notes" in patch:
-                    _replace_voice(measure, voice, staff, patch["notes"], divisions,
-                                   others=not patch.get("voice"))
-                else:
-                    _edit_voice(measure, voice, staff, patch["edit"].split(), divisions)
-                    _fix_following_backup(measure, voice, divisions)
-            except ValueError as err:
-                raise ValueError(f"patch {part_name} bar {number}: {err}") from err
-            expected = None
-            for attributes in measure.findall("attributes"):
-                expected = score._time_signature(attributes) or expected
-            if expected is None and ("time", "1") in state:
-                expected = score._time_signature(_wrap(state[("time", "1")]))
-            expected = expected or assume
-            for check_voice in {n.findtext("voice") or "1" for n in measure.findall("note")}:
-                if drum or "notes" in patch or check_voice == voice:
-                    span = _voice_span(measure, check_voice, divisions)
-                    if expected is not None and span != expected:
-                        raise ValueError(f"patch {part_name} bar {number}: voice {check_voice} "
-                                         f"lasts {span} crotchets, the bar {expected}")
+            for patch in patch_list if isinstance(patch_list, list) else [patch_list]:
+                _apply_patch(part, measure, state, patch, f"{part_name} bar {number}", assume)
             report.append(f"{part_name} bar {number}: patched")
     return report
+
+
+def _apply_patch(part: ET.Element, measure: ET.Element, state: dict, patch, where: str,
+                 assume: Fraction | None) -> None:
+    divisions = _divisions(measure, state)
+    if isinstance(patch, str):
+        patch = {"edit": patch}
+    first = measure.find("note")
+    voice = patch.get("voice") or (first.findtext("voice") if first is not None else None) or "1"
+    staff = patch.get("staff") or (first.findtext("staff") if first is not None else None)
+    drum = any(key in patch for key, _, _ in DRUM_VOICES)
+    try:
+        if drum:
+            voices = [parse_groove_voice(patch.get(key, "")) for key, _, _ in DRUM_VOICES]
+            _fit_divisions(part, voices)
+            divisions = _divisions(measure, state)
+            _write_drum_voices(measure, *voices[:2], divisions, voices[2])
+        elif "notes" in patch:
+            _replace_voice(measure, voice, staff, patch["notes"], divisions, others=not patch.get("voice"))
+        else:
+            _edit_voice(measure, voice, staff, patch["edit"].split(), divisions)
+            _fix_following_backup(measure, voice, divisions)
+    except ValueError as err:
+        raise ValueError(f"patch {where}: {err}") from err
+    expected = None
+    for attributes in measure.findall("attributes"):
+        expected = score._time_signature(attributes) or expected
+    if expected is None and ("time", "1") in state:
+        expected = score._time_signature(_wrap(state[("time", "1")]))
+    expected = expected or assume
+    for check_voice in {n.findtext("voice") or "1" for n in measure.findall("note")}:
+        if drum or "notes" in patch or check_voice == voice:
+            span = _voice_span(measure, check_voice, divisions)
+            if expected is not None and span != expected:
+                raise ValueError(f"patch {where}: voice {check_voice} lasts {span} crotchets, the bar {expected}")
 
 
 def repair(root: ET.Element, config: dict) -> list[str]:

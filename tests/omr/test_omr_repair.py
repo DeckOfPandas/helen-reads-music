@@ -753,6 +753,26 @@ def test_replacing_one_voice_of_a_piano_keeps_the_other_staff():
     assert score.bad_bars(root.find("part")) == []
 
 
+def test_a_bar_takes_a_patch_for_each_of_two_voices():
+    # Voice 1 a crotchet short; voice 2 a chord whose ties were lost.
+    measure = ('<measure number="1">' + attributes()
+               + "".join(f"<note><pitch><step>D</step><octave>5</octave></pitch><duration>4</duration>"
+                         f"<voice>1</voice><staff>1</staff></note>" for _ in range(3))
+               + "<backup><duration>12</duration></backup>"
+               + "".join(f"<note>{'<chord/>' if i else ''}<pitch><step>{s}</step><octave>4</octave></pitch>"
+                         f"<duration>16</duration><voice>2</voice><staff>1</staff></note>"
+                         for i, s in enumerate("DFA"))
+               + "</measure>")
+    root = build([("P1", "Piano", f'<part id="P1">{measure}</part>')])
+    repair.apply_patches(root, {"Piano": {"1": [{"voice": "1", "notes": "D5:1 D5:1 D5:1 D5:1~"},
+                                                {"voice": "2", "notes": "D4+F4+A4:4~"}]}})
+    m = root.find("part/measure")
+    assert m.find("backup/duration").text == "16"
+    chord = [n for n in m.findall("note") if n.findtext("voice") == "2"]
+    assert [n.find("tie").get("type") for n in chord] == ["start"] * 3
+    assert score.bad_bars(root.find("part")) == []
+
+
 def test_shortening_a_whole_bar_rest_makes_it_an_ordinary_rest():
     measure = ('<measure number="1">' + attributes()
                + '<note><rest measure="yes"/><duration>16</duration><voice>1</voice></note></measure>')

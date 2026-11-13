@@ -70,7 +70,7 @@ reading adds up and differs from the score, it wins:
 - an accent, marcato, tenuto or staccato goes to the nearest notehead, even
   one on the next stave;
 - rests missing from an otherwise right bar are put back;
-- ties are set as drawn;
+- ties are set as drawn (across a system break too, a chord's ties each);
 - a fingered tremolo (two minims a beam's strokes apart, together lasting
   one) is written as one;
 - a drum bar is written from the drawing, voices as drawn, a voice the page
@@ -79,8 +79,14 @@ reading adds up and differs from the score, it wins:
 A bar whose drawing does not add up (tuplets, grace notes) is reported, not
 changed. Text is drawn as shapes too, and not read: lyrics are what
 Audiveris read. Bars patched by hand are left alone; after the patches they
-are checked against the drawing, and only their ties are corrected. A
-scanned PDF has no drawing, and no `glyphs.json` means no check.
+are checked against the drawing, which only adds ties it sees: a tie can
+hide from it behind another voice's notes, so it removes none. A scanned
+PDF has no drawing, and no `glyphs.json` means no check.
+
+A part printed several systems to a page (a piano part on grand staves)
+is checked system by system: a page with more staves than the score has is
+split into systems where bar lines join staves. Every page of every PDF
+counts, in order, so a five-page PDF is pages 1-5.
 
 To check a bar by eye, `vector.py picture library/<piece> <page> <stave>
 <first bar> <last bar>` writes a PNG of it to `omr/views/bars/`.
@@ -126,7 +132,7 @@ call:
 | `"transpose": {"Clarinet in Bb": "Bb"}` | Marks transposing instruments (Bb, A, F, Eb, 8va, 8vb) and gives them their written key |
 | `"octave_clefs": false` | The score has no octave clefs: undoes treble clefs Audiveris read as "8 below" |
 | `"key_changes": {"125": 0}` | A key change Audiveris read but failed to export: writes it into the parts that lack it and respells the notes the old key altered |
-| `"patches": {"Oboe": {"121": "1/2 1/2 +r:1/2 ..."}}` | Hand corrections to single bars, for what no tool reads (a tuplet, a grace note, a word Audiveris missed), applied last: edit the existing notes (lengths, re-pitch, insert, delete) so lyrics and marks survive, or replace a voice; fingered tremolos as `F4+Bb4/D5:2`; see `repair.py --help` |
+| `"patches": {"Oboe": {"121": "1/2 1/2 +r:1/2 ..."}}` | Hand corrections to single bars, for what no tool reads (a tuplet, a grace note, a word Audiveris missed), applied last: edit the existing notes (lengths, re-pitch, insert, delete) so lyrics and marks survive, or replace a voice; a list of patches for a bar patches several voices; fingered tremolos as `F4+Bb4/D5:2`; see `repair.py --help` |
 | `"vocal_parts": ["Voice"]` | Parts whose lyrics are lyrics; elsewhere dynamics, accents and instructions Audiveris read as lyrics become marks again (the default is just "Voice") |
 | `"drum_key": {"F5 x": 51}` | Extra drum sounds by stave position and notehead, as General MIDI numbers (named as General MIDI names them); every drum note gets its instrument, hands stems up, feet stems down |
 | `"drum_grooves": {...}` | Writes whole kit bars (hi-hats, slashes, triplets, flams, rolls, a second hands voice) into the bars whose kick and snare match, or into listed bars, with the bars' words and dynamics (`"marks"`); see `repair.py --help` |

@@ -190,6 +190,88 @@ def test_a_mark_nearer_the_stave_above_belongs_to_its_note(tmp_path):
     assert rest.marks == set()
 
 
+def read_one_bar(e: Engraver, tmp_path: Path) -> dict:
+    piece = tmp_path / "piece"
+    piece.mkdir()
+    pdf = e.save(piece / "page.pdf")
+    e.catalogue(pdf, piece)
+    with pymupdf.open(pdf) as doc:
+        drawn = vector.read_page(doc[0])
+        beams = vector_read.beams_on_page(doc[0])
+        curves = vector_read.curves_on_page(doc[0])
+    vector.name_glyphs(drawn, vector.load_catalogue(piece))
+    return vector_read.read_bar(drawn, beams, 0, 0, Fraction(4), curves=curves)
+
+
+def test_stacked_flats_in_a_chord_go_to_their_own_notes(tmp_path):
+    # Flats in three columns before a four-note chord: each to the head at
+    # its bulb, the farthest reached across the column beside it.
+    e = Engraver()
+    stave = e.stave(100.0, [50.0, 130.0])
+    for step in (0, 2, 4, 6):
+        e.head(stave, 100.0, step)
+    e.stem(103.5, stave.y(6) - GAP * 3.5, stave.y(0))
+    for x, step in ((96.5, 0), (93.75, 4), (91.0, 6)):
+        e.sign(stave, "flat", x, step)
+    (chord,) = read_one_bar(e, tmp_path)["single"]
+    assert {h.step: h.accidental for h in chord.heads} == {0: -1, 2: None, 4: -1, 6: -1}
+
+
+def test_a_double_dot_adds_three_quarters(tmp_path):
+    # | minim, double-dotted crotchet, quaver |
+    e = Engraver()
+    stave = e.stave(100.0, [50.0, 130.0])
+    e.note(stave, 60.0, 5, kind="half", stem="down")
+    rect, _ = e.note(stave, 80.0, 5, stem="down", dot=True)
+    e.glyph("dot", rect.x1 + 3.0, rect.y0 + 1.0)
+    e.note(stave, 110.0, 5, stem="down", flag=True)
+    lengths = [ev.length for ev in read_one_bar(e, tmp_path)["single"]]
+    assert lengths == [2, Fraction(7, 4), Fraction(1, 2)]
+
+
+def test_dots_pushed_out_to_line_up_still_count(tmp_path):
+    # | dotted minim, its dot two spaces out; crotchet |
+    e = Engraver()
+    stave = e.stave(100.0, [50.0, 130.0])
+    rect, _ = e.note(stave, 60.0, 5, kind="half", stem="down")
+    e.glyph("dot", rect.x1 + 6.5, rect.y0 + 1.0)
+    e.note(stave, 100.0, 5, stem="down")
+    assert [ev.length for ev in read_one_bar(e, tmp_path)["single"]] == [3, 1]
+
+
+def test_a_chord_tied_on_past_the_system_end(tmp_path):
+    # A three-note chord, each note with a short tie running off the system.
+    e = Engraver()
+    stave = e.stave(100.0, [50.0, 130.0])
+    e.note(stave, 60.0, 5, kind="whole", stem=None)
+    for step in (0, 2, 4):
+        rect = e.head(stave, 110.0, step, "half")
+    e.stem(rect.x1, stave.y(4) - GAP * 3.5, stave.y(0))
+    for step in (0, 2, 4):
+        e.tie(rect.x1 + 0.25, rect.x1 + 8.0, stave.y(step) + 1.0)
+    _, chord = read_one_bar(e, tmp_path)["single"]
+    assert [h.tie_start for h in chord.heads] == [True, True, True]
+
+
+def test_a_tie_with_blunt_ends_is_a_tie(tmp_path):
+    e = Engraver()
+    stave = e.stave(100.0, [50.0, 130.0])
+    first, _ = e.note(stave, 60.0, 5, kind="half", stem="down")
+    second, _ = e.note(stave, 95.0, 5, kind="half", stem="down")
+    e.tie(first.x1 + 0.25, second.x0 - 0.25, first.y0 - 0.5, blunt=True)
+    first_note, second_note = read_one_bar(e, tmp_path)["single"]
+    assert first_note.heads[0].tie_start and second_note.heads[0].tie_stop
+
+
+def test_a_squat_whole_note_is_not_a_curve(tmp_path):
+    e = Engraver()
+    e.shape.draw_oval(pymupdf.Rect(60.0, 100.0, 68.4, 105.0))   # 1.7 spaces by 1
+    e.shape.finish(color=None, fill=(0, 0, 0))
+    pdf = e.save(tmp_path / "page.pdf")
+    with pymupdf.open(pdf) as doc:
+        assert vector_read.curves_on_page(doc[0]) == []
+
+
 def test_reads_whole_and_half_rests_by_where_they_sit(page):
     drawn, beams, curves = page
     whole = vector_read.read_bar(drawn, beams, 1, 0, Fraction(4))
@@ -288,12 +370,153 @@ def test_bars_left_alone_are_not_touched(tmp_path):
     assert pitches(notes_of(root, "P1", "1"))[1] == ("E", 0, 5)
 
 
+def test_a_patched_bar_gains_the_drawn_ties_and_keeps_its_own(tmp_path):
+    # Bar 3's tie is drawn but lost from the score; bar 1's last note carries
+    # a tie the patch wrote and the drawing does not show.
+    piece, pdf = engrave(tmp_path)
+    root = misread()
+    flute = next(p for p in root.findall("part") if p.get("id") == "P1")
+    bar1 = flute.find("measure")
+    bar1.remove(bar1.findall("note")[1])
+    bar1.insert(list(bar1).index(bar1.findall("note")[1]),
+                ET.fromstring("<note><pitch><step>D</step><octave>5</octave></pitch><duration>4</duration>"
+                              "<voice>1</voice></note>"))
+    last = bar1.findall("note")[-1]
+    last.append(ET.fromstring('<tie type="start"/>'))
+    drawing_check.check(root, piece, [pdf], only={("Flute", "1"), ("Flute", "3")})
+    assert [t.get("type") for t in notes_of(root, "P1", "1")[-1].findall("tie")] == ["start"]
+    first, second = notes_of(root, "P1", "3")
+    assert [t.get("type") for t in first.findall("tie")] == ["start"]
+    assert [t.get("type") for t in second.findall("tie")] == ["stop"]
+
+
 def test_no_catalogue_no_check(tmp_path):
     piece, pdf = engrave(tmp_path)
     (piece / "glyphs.json").unlink()
     root = misread()
     findings, report = drawing_check.check(root, piece, [pdf])
     assert findings == [] and "skipped" in report[0]
+
+
+# --- a part printed several systems to a page, over several pages ---------------------------
+
+PIANO_BARS = [50.0, 130.0, 210.0]
+SYSTEM_TOPS = (100.0, 220.0)                                        # the treble stave's; the bass 40 below
+
+
+def treble_steps(number: int) -> list[int]:
+    """Bar `number`'s four treble crotchets, C5 to F5 in a turn that differs bar to bar."""
+    return [5 + (number + i) % 4 for i in range(4)]
+
+
+def engrave_piano(tmp_path: Path, stem_width: float = 0.35, bar_width: float = 0.5) -> tuple[Path, Path]:
+    """A piano part on grand staves, two systems a page of two bars each, over
+    two pages, in one PDF: bars 1-8. Every bar: four treble crotchets, the
+    first a chord on D4 with its stem across the whole stave; a bass whole
+    note C3."""
+    e = Engraver(stem_width=stem_width, bar_width=bar_width)
+    number = 1
+    for page_index in range(2):
+        if page_index:
+            e.new_page()
+        for top in SYSTEM_TOPS:
+            treble = e.stave(top, PIANO_BARS)
+            bass = e.stave(top + 40.0, PIANO_BARS)
+            e.join(treble, bass)
+            e.clef(treble, "treble")
+            e.clef(bass, "bass")
+            for left in PIANO_BARS[:-1]:
+                first, *rest = treble_steps(number)
+                low = e.head(treble, left + 20.0, -1)
+                e.head(treble, left + 20.0, first)
+                e.stem(low.x1, treble.y(first) - GAP * 3.5, treble.y(-1))
+                for i, step in enumerate(rest, start=1):
+                    e.note(treble, left + 20.0 + 15.0 * i, step, stem="down")
+                e.head(bass, left + 35.0, 3, "whole")
+                number += 1
+    piece = tmp_path / "piece"
+    piece.mkdir()
+    pdf = e.save(piece / "piano.pdf")
+    e.catalogue(pdf, piece)
+    return piece, pdf
+
+
+PIANO_ATTRIBUTES = ("<attributes><divisions>4</divisions><key><fifths>0</fifths></key><time><beats>4</beats>"
+                    "<beat-type>4</beat-type></time><staves>2</staves><clef number=\"1\"><sign>G</sign>"
+                    "<line>2</line></clef><clef number=\"2\"><sign>F</sign><line>4</line></clef></attributes>")
+
+
+def piano_note(step: str, octave: int, duration: int, staff: int, voice: int, chord: bool = False) -> str:
+    body = "<rest/>" if step == "r" else f"<pitch><step>{step}</step><octave>{octave}</octave></pitch>"
+    return (f"<note>{'<chord/>' if chord else ''}{body}<duration>{duration}</duration><voice>{voice}</voice>"
+            f"<staff>{staff}</staff></note>")
+
+
+def misread_piano(wrong_treble: int, lost_bass: int) -> ET.Element:
+    """The piano part as read, but bar `wrong_treble`'s first note a step
+    high and bar `lost_bass`'s whole note read as a rest."""
+    names = "CDEFGAB"
+    bars = []
+    for number in range(1, 9):
+        steps = treble_steps(number)
+        if number == wrong_treble:
+            steps[0] += 1
+        treble = piano_note("D", 4, 4, 1, 1) + "".join(
+            piano_note(names[(s - 5) % 7], 5 + (s - 5) // 7, 4, 1, 1, chord=i == 0) for i, s in enumerate(steps))
+        bass = piano_note("r" if number == lost_bass else "C", 3, 16, 2, 5)
+        bars.append(f'<measure number="{number}">{PIANO_ATTRIBUTES if number == 1 else ""}{treble}'
+                    f"<backup><duration>16</duration></backup>{bass}</measure>")
+    return ET.fromstring(make_score([("P1", "Piano", f'<part id="P1">{"".join(bars)}</part>')]))
+
+
+def test_a_page_of_grand_staves_is_two_staves_a_system(tmp_path):
+    _, pdf = engrave_piano(tmp_path)
+    with pymupdf.open(pdf) as doc:
+        drawn = vector.read_page(doc[1])
+    assert drawn.systems(2) == [[0, 1], [2, 3]]
+    assert drawn.systems(4) == [[0, 1, 2, 3]]                    # a full score: the page is one system
+
+
+def test_stems_as_wide_as_some_software_draws_them_are_not_bar_lines(tmp_path):
+    # Stems at 0.6 pt, bar lines at 0.8: every stem crossing a stave would
+    # otherwise split its bar.
+    _, pdf = engrave_piano(tmp_path, stem_width=0.6, bar_width=0.8)
+    with pymupdf.open(pdf) as doc:
+        drawn = vector.read_page(doc[0])
+    assert [drawn.bar_count(s) for s in range(4)] == [2, 2, 2, 2]
+
+
+def test_every_page_of_a_pdf_is_a_page_of_the_piece(tmp_path):
+    piece, pdf = engrave_piano(tmp_path)
+    assert vector.pdf_pages([pdf]) == [(pdf, 0), (pdf, 1)]
+    out = vector.picture(piece, 2, 3, 0, 1)
+    assert out.name == "page2-stave3-bars0-1.png" and out.read_bytes()[:4] == b"\x89PNG"
+
+
+@pytest.fixture(params=[(0.35, 0.5), (0.6, 0.8)], ids=["thin stems", "wide stems"])
+def piano_checked(tmp_path, request):
+    piece, pdf = engrave_piano(tmp_path, *request.param)
+    root = misread_piano(wrong_treble=7, lost_bass=4)
+    findings, report = drawing_check.check(root, piece, [pdf])
+    return root, findings, report
+
+
+def test_each_system_of_each_page_is_matched_to_the_grand_stave(piano_checked):
+    _, _, report = piano_checked
+    layout = [line.strip() for line in report[report.index(
+        "drawn staves matched to parts (stave numbers from the top of the page, from 0):") + 1:]]
+    assert layout == ["page 1 (bars 1-2): 0=Piano/1, 1=Piano/2", "page 1 (bars 3-4): 2=Piano/1, 3=Piano/2",
+                      "page 2 (bars 5-6): 0=Piano/1, 1=Piano/2", "page 2 (bars 7-8): 2=Piano/1, 3=Piano/2"]
+
+
+def test_bars_on_a_later_system_and_page_are_corrected(piano_checked):
+    root, findings, _ = piano_checked
+    names = "CDEFGAB"
+    treble = [n for n in notes_of(root, "P1", "7") if n.findtext("staff") == "1"]
+    assert pitches(treble) == [("D", 0, 4)] + [(names[(s - 5) % 7], 0, 5) for s in treble_steps(7)]
+    bass = [n for n in notes_of(root, "P1", "4") if n.findtext("staff") == "2"]
+    assert pitches(bass) == [("C", 0, 3)]
+    assert {(f.bar, f.staff) for f in findings} == {("7", 1), ("4", 2)}
 
 
 # --- keeping what is not notes ------------------------------------------------------------
