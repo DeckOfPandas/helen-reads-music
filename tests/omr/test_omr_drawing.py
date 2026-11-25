@@ -36,6 +36,16 @@ def engrave(tmp_path: Path) -> tuple[Path, Path]:
             kick crotchet on beat 3, no rests drawn | whole rest |
     """
     e = Engraver()
+    _engrave_into(e)
+    piece = tmp_path / "piece"
+    piece.mkdir()
+    pdf = e.save(piece / "page.pdf")
+    e.catalogue(pdf, piece)
+    return piece, pdf
+
+
+def _engrave_into(e: Engraver) -> None:
+    """engrave()'s page, drawn with `e`."""
     flute = e.stave(100.0, BARS)
     e.clef(flute, "treble")
     e.sign(flute, "flat", 59.0, 4)                                  # key: one flat, on B4
@@ -76,12 +86,6 @@ def engrave(tmp_path: Path) -> tuple[Path, Path]:
         for i in kicks:
             e.note(drums, xs[i], 1, kind="half" if len(kicks) == 2 else "black", stem="down")
     e.rest(drums, 245.0, "whole")
-
-    piece = tmp_path / "piece"
-    piece.mkdir()
-    pdf = e.save(piece / "page.pdf")
-    e.catalogue(pdf, piece)
-    return piece, pdf
 
 
 def drum_bar(number: int, extra: str = "") -> str:
@@ -239,6 +243,71 @@ def test_a_second_on_a_down_stem_is_one_chord(tmp_path):
         e.stem(x, top.y0 + 1.5, stave.y(6) + GAP * 3.5)
     events = read_one_bar(e, tmp_path)["single"]
     assert [(ev.length, ev.stem, sorted(h.step for h in ev.heads)) for ev in events] == [(1, "down", [5, 6])] * 4
+
+
+def test_dynamics_where_the_drawing_has_none_are_dropped(tmp_path):
+    # An f drawn under the flute's first bar; the read has an f there and a
+    # p in bar 2, which the page does not draw (a chord box read as a "p").
+    root = misread()
+    flute = root.find("part")
+    for number, mark in (("1", "f"), ("2", "p")):
+        measure = next(m for m in flute.findall("measure") if m.get("number") == number)
+        direction = ET.Element("direction")
+        ET.SubElement(ET.SubElement(ET.SubElement(direction, "direction-type"), "dynamics"), mark)
+        measure.insert(1, direction)
+    drawn = Engraver()
+    _engrave_into(drawn)
+    drawn.glyph("dynamic", 72.0, 128.0)                     # under the flute's bar 1
+    piece = tmp_path / "with-f"
+    piece.mkdir()
+    pdf = drawn.save(piece / "page.pdf")
+    drawn.catalogue(pdf, piece)
+    _, report = drawing_check.check(root, piece, [pdf])
+    assert "  dynamics in bars that draw none, dropped: 1 (Flute 2)" in report
+    marks = [[c.tag for d in m.findall("direction") for c in d.iter() if c.tag in ("f", "p")]
+             for m in flute.findall("measure")]
+    assert marks[:2] == [["f"], []]
+
+
+def test_smufl_dynamics_are_read_and_letters_side_by_side_are_one():
+    stave = vector.Stave([100.0, 103.0, 106.0, 109.0, 112.0], 50.0, 230.0)
+    glyphs = [vector.Glyph("smufl:E521", 60.0, 116.0, 63.0, 119.0, "dynamic", 0, 0),      # m
+              vector.Glyph("smufl:E522", 63.2, 116.0, 66.0, 119.0, "dynamic", 0, 0),      # f, beside it: mf
+              vector.Glyph("smufl:E539", 150.0, 116.0, 156.0, 119.0, "dynamic", 0, 1),    # sfz
+              vector.Glyph("smufl:E0A4", 70.0, 104.0, 73.0, 107.0, "notehead-black", 0, 0)]
+    page = vector.Page([stave], [[50.0, 140.0, 230.0]], glyphs, [])
+    system = drawing_check.DrawnSystem(1, Path("x.pdf"), 0, page, [], [], [0], ["1", "2"], {0: 0})
+    assert drawing_check._drawn_dynamics(system) == {(0, 0): [(60.0, "mf")], (0, 1): [(150.0, "sfz")]}
+
+
+def test_dynamics_are_left_alone_where_the_drawing_names_none(checked):
+    _, _, report = checked
+    assert not any("dynamics in bars" in line for line in report)
+
+
+def test_a_whole_note_under_a_line_of_up_stems_is_a_second_voice(tmp_path):
+    # | crotchet rest, C5 crotchet, D5 minim | over a whole-note B4 below,
+    # held from the first beat: every stem points up, but the bar is two voices.
+    e = Engraver()
+    stave = e.stave(100.0, [50.0, 130.0])
+    e.rest(stave, 60.0, "quarter")
+    e.head(stave, 61.0, 1, "whole")
+    e.note(stave, 80.0, 5)
+    e.note(stave, 100.0, 6, kind="half")
+    voices = read_one_bar(e, tmp_path)
+    assert [(ev.length, [h.step for h in ev.heads]) for ev in voices["up"]] == [(1, []), (1, [5]), (2, [6])]
+    assert [(ev.length, [h.step for h in ev.heads]) for ev in voices["down"]] == [(4, [1])]
+
+
+def test_a_whole_note_chord_with_a_second_is_one_chord(tmp_path):
+    # B3, D4 and E4 as whole notes: E4 a second above D4, drawn a head to the right.
+    e = Engraver()
+    stave = e.stave(100.0, [50.0, 130.0])
+    e.head(stave, 80.0, -3, "whole")
+    e.head(stave, 80.0, -1, "whole")
+    e.head(stave, 84.5, 0, "whole")
+    (chord,) = read_one_bar(e, tmp_path)["single"]
+    assert chord.length == 4 and sorted(h.step for h in chord.heads) == [-3, -1, 0]
 
 
 def test_a_chord_spanning_its_up_stem_is_read_up(tmp_path):
