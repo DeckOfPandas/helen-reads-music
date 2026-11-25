@@ -173,6 +173,15 @@ def test_octave_clefs_are_kept_unless_the_table_says_there_are_none():
     assert root.find(".//clef-octave-change") is not None
 
 
+def test_a_bass_guitar_reaches_down_to_its_open_e():
+    # Under its octave clef MusicXML holds a bass guitar at sounding pitch: open E is E1.
+    bars = [bar(four_crotchets("E1"), 1, attributes(clef="F", line=4)), bar(four_crotchets("D1"), 2)]
+    root = build([("P1", "Bass Guitar", part("P1", bars)), ("P2", "Double Bass", part("P2", bars))])
+    guitar, double_bass = root.findall("part")
+    assert score.below_range(guitar, "Bass Guitar") == ["2"]
+    assert score.below_range(double_bass, "Double Bass") == ["1", "2"]
+
+
 def test_range_check_names_the_bars():
     bars = [bar(four_crotchets("G3"), 1, octave_low("")), bar(four_crotchets("F3"), 2)]
     root = build([("P1", "Violin II", part("P1", bars)), ("P2", "Marimba", part("P2", bars))])
@@ -360,6 +369,41 @@ def test_a_flam_and_a_roll():
     assert notes[0].find("grace").get("slash") == "yes" and notes[0].find("duration") is None
     assert notes[2].find("notations/ornaments/tremolo").text == "3"
     assert score.bad_bars(root.find("part")) == []
+
+
+def test_closed_and_let_ring_heads_staccato_cue_and_hidden_rest():
+    root = build([("P1", "Drum Set", f'<part id="P1">{drum_bar(1, KICK_ONLY, True)}</part>')])
+    repair.apply_patches(root, {"Drum Set": {"1": {"up": "cxG5:1 xA5:1>l C5:1.q r:1h"}}})
+    notes = root.find("part/measure").findall("note")
+    assert notes[0].find("notations/technical/stopped") is not None
+    assert notes[1].find("notations/tied").get("type") == "let-ring" and notes[1].find("tie") is None
+    assert notes[2].find("notations/articulations/staccato") is not None
+    assert list(notes[2])[0].tag == "cue"                       # before <unpitched>, as MusicXML orders it
+    assert notes[3].get("print-object") == "no"
+    assert score.bad_bars(root.find("part")) == []
+
+
+def test_pitched_notes_and_a_fingered_tremolo():
+    """A percussionist's part that turns to timpani or xylophone holds real
+    pitches; two notes in a fingered tremolo each print at twice their
+    length."""
+    events = repair.parse_groove_voice("pF#3:1 pBb2:1 E5:1t A4:1")
+    assert events[0].heads[0].pitched and events[0].heads[0].alter == 1 and events[1].heads[0].alter == -1
+    root = build([("P1", "Drum Set", f'<part id="P1">{drum_bar(1, KICK_ONLY, True)}</part>')])
+    repair.apply_patches(root, {"Drum Set": {"1": {"up": "pF#3:1 pBb2:1 E5:1>t A4:1"}}})
+    notes = root.find("part/measure").findall("note")
+    assert notes[0].findtext("pitch/step") == "F" and notes[0].findtext("pitch/alter") == "1"
+    assert notes[0].findtext("accidental") == "sharp" and notes[0].find("stem") is None
+    assert [n.find("notations/ornaments/tremolo").get("type") for n in notes[2:]] == ["start", "stop"]
+    assert [n.findtext("type") for n in notes[2:]] == ["half", "half"]
+    assert notes[2].findtext("time-modification/actual-notes") == "2"
+    assert score.bad_bars(root.find("part")) == []
+
+
+@pytest.mark.parametrize("token", ["C#5:1", "xG5:1h", "C5:1t", "C5:gt"])
+def test_marks_that_do_not_fit_their_note_are_refused(token):
+    with pytest.raises(ValueError):
+        repair.parse_groove_voice(token)
 
 
 @pytest.mark.parametrize("token", ["C5:0", "r:g", "C5:-1"])
@@ -682,6 +726,19 @@ def test_a_patch_inserts_a_tied_note_with_its_lyric():
     assert [c.tag for c in g] == ["pitch", "duration", "tie", "voice", "type", "notations", "lyric"]
 
 
+def test_a_patch_inserts_a_grace_note_that_takes_no_time():
+    # Guitar: a slashed grace C5 before the third crotchet, which Audiveris dropped.
+    root = build([_timed_part("P1", "Lead Guitar", [("E5", 1), ("D5", 1), ("D5", 1), ("C5", 1)])])
+    repair.apply_patches(root, {"Lead Guitar": {"1": "1 1 +C5:g 1 1"}})
+    notes = root.find("part/measure").findall("note")
+    grace = notes[2]
+    assert grace.findtext("pitch/step") == "C" and grace.find("duration") is None
+    assert grace.find("grace").get("slash") == "yes" and grace.findtext("type") == "eighth"
+    assert [c.tag for c in grace][:2] == ["grace", "pitch"]
+    assert notes[3].findtext("pitch/step") == "D"
+    assert score.bad_bars(root.find("part")) == []
+
+
 def test_a_patch_can_tie_from_the_bar_before_and_spell_accidentals():
     root = build([_timed_part("P1", "Voice", [("E5", 0.5), ("D5", 0.5), ("C5", 1)])])
     repair.apply_patches(root, {"Voice": {"1": "+~G5:2 1/2 1/2 1"}})
@@ -750,6 +807,26 @@ def test_replacing_one_voice_of_a_piano_keeps_the_other_staff():
     assert [e.tag for e in m if e.tag in ("note", "backup")] == ["note"] * 5 + ["backup", "note"]
     assert m.find("backup/duration").text == "16"
     assert m.findall("note")[-1].findtext("staff") == "2"
+    assert score.bad_bars(root.find("part")) == []
+
+
+def test_a_bar_takes_a_patch_for_each_of_two_voices():
+    # Voice 1 a crotchet short; voice 2 a chord whose ties were lost.
+    measure = ('<measure number="1">' + attributes()
+               + "".join(f"<note><pitch><step>D</step><octave>5</octave></pitch><duration>4</duration>"
+                         f"<voice>1</voice><staff>1</staff></note>" for _ in range(3))
+               + "<backup><duration>12</duration></backup>"
+               + "".join(f"<note>{'<chord/>' if i else ''}<pitch><step>{s}</step><octave>4</octave></pitch>"
+                         f"<duration>16</duration><voice>2</voice><staff>1</staff></note>"
+                         for i, s in enumerate("DFA"))
+               + "</measure>")
+    root = build([("P1", "Piano", f'<part id="P1">{measure}</part>')])
+    repair.apply_patches(root, {"Piano": {"1": [{"voice": "1", "notes": "D5:1 D5:1 D5:1 D5:1~"},
+                                                {"voice": "2", "notes": "D4+F4+A4:4~"}]}})
+    m = root.find("part/measure")
+    assert m.find("backup/duration").text == "16"
+    chord = [n for n in m.findall("note") if n.findtext("voice") == "2"]
+    assert [n.find("tie").get("type") for n in chord] == ["start"] * 3
     assert score.bad_bars(root.find("part")) == []
 
 

@@ -109,3 +109,21 @@ def test_cli_merge_and_refusal(tmp_path, capsys):
     empty.mkdir()
     assert pages.main(["merge", str(empty), str(tmp_path / "x.pdf")]) == 1
     assert "no PDFs" in capsys.readouterr().err
+
+
+def test_an_svg_page_becomes_a_drawn_pdf_and_names_its_broken_links(tmp_path, capsys):
+    # A stave line and a glyph placed twice, plus a link to a symbol never defined.
+    svg = tmp_path / "page.svg"
+    svg.write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" '
+        'width="200" height="100" viewBox="0 0 200 100"><defs><symbol id="a" overflow="visible">'
+        '<path d="M0 0h4v4h-4z"/></symbol></defs><path d="M10 50H190" stroke="#000" stroke-width="0.5"/>'
+        '<use xlink:href="#a" x="20" y="40"/><use xlink:href="#a" x="40" y="40"/>'
+        '<use xlink:href="#gone" x="60" y="40"/></svg>', encoding="utf-8")
+    out = tmp_path / "page.pdf"
+    assert pages.main(["svg", str(svg), str(out)]) == 0
+    assert "drawn as nothing: gone" in capsys.readouterr().out
+    with pymupdf.open(out) as doc:
+        drawings = doc[0].get_drawings()
+    assert sum(1 for d in drawings if d.get("fill") is not None) >= 2
+    assert any(d.get("fill") is None and any(item[0] == "l" for item in d["items"]) for d in drawings)

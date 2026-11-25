@@ -170,6 +170,28 @@ def test_diff_lists_bars_whose_notes_or_lyrics_changed(tmp_path):
     assert score.diff(old, old) == ["0 difference(s)"]
 
 
+def test_extract_keeps_the_named_parts_and_drops_an_emptied_brace(tmp_path, capsys):
+    # A full score: singer, piano (in a brace), guitar, drums; the band wants the last two.
+    bars = [bar(four_crotchets(), 1, attributes())]
+    parts = [(f"P{i}", name, part(f"P{i}", bars)) for i, name in enumerate(["Ken", "Piano", "Guitar", "Drums"], 1)]
+    xml = make_score(parts)
+    xml = xml.replace('<score-part id="P2">', '<part-group type="start" number="1"><group-symbol>brace</group-symbol>'
+                      '</part-group><score-part id="P2">')
+    xml = xml.replace('<score-part id="P3">', '<part-group type="stop" number="1"/><score-part id="P3">')
+    xml = xml.replace('<score-part id="P3">', '<part-group type="start" number="2"/><score-part id="P3">')
+    xml = xml.replace("</part-list>", '<part-group type="stop" number="2"/></part-list>')
+    source = write_mxl(tmp_path / "full.mxl", xml)
+    out = tmp_path / "band.musicxml"
+    assert score.main(["extract", str(source), str(out), "Guitar", "Drums"]) == 0
+    root = score.load(out)
+    assert score.part_names(root) == [("P3", "Guitar"), ("P4", "Drums")]
+    assert [p.get("id") for p in root.findall("part")] == ["P3", "P4"]
+    groups = [(g.get("type"), g.get("number")) for g in root.find("part-list").findall("part-group")]
+    assert groups == [("start", "2"), ("stop", "2")]             # the piano's brace went with it
+    assert "band.musicxml: Guitar, Drums" in capsys.readouterr().out
+    assert score.main(["extract", str(source), str(out), "Bass"]) == 1
+
+
 def test_cli_names(tmp_path, capsys):
     mxl = write_mxl(tmp_path / "s.mxl", make_score([("P1", "Fl.", part("P1", [])), ("P2", "Ob.", part("P2", []))]))
     assert score.main(["names", str(mxl)]) == 0

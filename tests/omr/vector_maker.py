@@ -61,6 +61,11 @@ SHAPES = {
     "clef-bass": (7.5, 8.5, "polygon", 15),
     "clef-percussion": (3.0, 6.0, "polygon", 16),
     "accent": (4.0, 2.5, "polygon", 4),     # `catalogue` needs a shape that fills its box
+    "rest-16th": (3.5, 7.0, "polygon", 17),
+    "time-3": (3.0, 3.0, "polygon", 18),
+    "time-4": (3.0, 3.0, "polygon", 19),
+    "clef-8": (2.0, 3.0, "polygon", 31),
+    **{f"fret-{n}": (1.75, 2.5, "polygon", 20 + n) for n in range(10)},    # tab digits, one shape each
 }
 
 
@@ -84,10 +89,31 @@ class Stave:
 class Engraver:
     width: float = 595.0
     height: float = 842.0
-    drawn: list[tuple[pymupdf.Rect, str]] = field(default_factory=list)
+    stem_width: float = STEM_WIDTH
+    bar_width: float = BAR_WIDTH
+    merged: bool = False          # every symbol on a page in one filled path, as a browser prints a score
+    drawn: list[tuple[int, pymupdf.Rect, str]] = field(default_factory=list)   # page index, box, name
 
     def __post_init__(self):
         self.doc = pymupdf.open()
+        self.shape = None
+        self.pending: list[tuple[str, float, float]] = []
+        self.new_page()
+
+    def _flush(self) -> None:
+        """Draw the page's held symbols as one filled path."""
+        if not self.pending:
+            return
+        for name, x, y in self.pending:
+            self._outline(name, x, y)
+        self.shape.finish(color=None, fill=BLACK, closePath=True)
+        self.pending = []
+
+    def new_page(self) -> None:
+        """Draw from here on on a fresh page after the last."""
+        if self.shape is not None:
+            self._flush()
+            self.shape.commit()
         self.page = self.doc.new_page(width=self.width, height=self.height)
         self.shape = self.page.new_shape()
 
@@ -97,18 +123,26 @@ class Engraver:
         self.shape.draw_line((x0, y0), (x1, y1))
         self.shape.finish(color=BLACK, width=width, fill=None, closePath=False)
 
-    def stave(self, top: float, bar_lines: list[float]) -> Stave:
-        """Five lines from the first bar line to the last, and the bar lines."""
+    def stave(self, top: float, bar_lines: list[float], by_bar: bool = False) -> Stave:
+        """Five lines from the first bar line to the last, and the bar lines;
+        `by_bar`, each bar's lines drawn on their own, end to end."""
         left, right = bar_lines[0], bar_lines[-1]
+        spans = list(zip(bar_lines, bar_lines[1:])) if by_bar else [(left, right)]
         for k in range(5):
-            self._line(left, top + k * GAP, right, top + k * GAP, STAVE_WIDTH)
+            for x0, x1 in spans:
+                self._line(x0, top + k * GAP, x1, top + k * GAP, STAVE_WIDTH)
         stave = Stave(top, left, right, bar_lines)
         for x in bar_lines:
-            self._line(x, stave.top, x, stave.bottom, BAR_WIDTH)
+            self._line(x, stave.top, x, stave.bottom, self.bar_width)
         return stave
 
+    def join(self, upper: Stave, lower: Stave) -> None:
+        """Bar lines from the top of `upper` to the foot of `lower`: a grand stave."""
+        for x in upper.bar_lines:
+            self._line(x, upper.top, x, lower.bottom, self.bar_width)
+
     def stem(self, x: float, y0: float, y1: float) -> None:
-        self._line(x, y0, x, y1, STEM_WIDTH)
+        self._line(x, y0, x, y1, self.stem_width)
 
     def ledgers(self, stave: Stave, x: float, step: int) -> None:
         """Ledger lines out to a head at `step`, as wide as a head and a bit."""
@@ -121,18 +155,29 @@ class Engraver:
 
     def glyph(self, name: str, x: float, y: float) -> pymupdf.Rect:
         """A symbol with its top-left corner at (x, y)."""
-        width, height, kind, detail = SHAPES[name]
+        width, height, _, _ = SHAPES[name]
         rect = pymupdf.Rect(x, y, x + width, y + height)
+        if self.merged:
+            self.pending.append((name, x, y))
+        else:
+            self._outline(name, x, y)
+            self.shape.finish(color=None, fill=BLACK, closePath=True)
+        self.drawn.append((self.page.number, rect, name))
+        return rect
+
+    def _outline(self, name: str, x: float, y: float) -> None:
+        width, height, kind, detail = SHAPES[name]
         if kind == "oval":
-            self.shape.draw_oval(rect)
+            self.shape.draw_oval(pymupdf.Rect(x, y, x + width, y + height))
+        elif kind == "rect" and self.merged:
+            # As four lines, not a rectangle item: a merged path is lines and curves.
+            corners = [(x, y), (x + width, y), (x + width, y + height), (x, y + height)]
+            self.shape.draw_polyline(corners + [corners[0]])
         elif kind == "rect":
-            self.shape.draw_rect(rect)
+            self.shape.draw_rect(pymupdf.Rect(x, y, x + width, y + height))
         else:
             points = [(x + px, y + py) for px, py in _polygon(width, height, detail)]
             self.shape.draw_polyline(points + [points[0]])
-        self.shape.finish(color=None, fill=BLACK, closePath=True)
-        self.drawn.append((rect, name))
-        return rect
 
     def head(self, stave: Stave, x: float, step: int, kind: str = "black") -> pymupdf.Rect:
         name = f"notehead-{kind}"
@@ -164,11 +209,17 @@ class Engraver:
         self.shape.draw_rect(pymupdf.Rect(x0, y, x1, y + 1.5))
         self.shape.finish(color=None, fill=BLACK)
 
-    def tie(self, x0: float, x1: float, y: float) -> None:
-        """A tie below y: a filled crescent of two curves."""
+    def tie(self, x0: float, x1: float, y: float, blunt: bool = False) -> None:
+        """A tie below y: a filled crescent of two curves; `blunt`, with a
+        short straight edge at each end, as some software draws one."""
         middle = (x0 + x1) / 2
+        end = 0.3 if blunt else 0.0
         self.shape.draw_bezier((x0, y), (middle - 1, y + 2.5), (middle + 1, y + 2.5), (x1, y))
-        self.shape.draw_bezier((x1, y), (middle + 1, y + 1.5), (middle - 1, y + 1.5), (x0, y))
+        if blunt:
+            self.shape.draw_line((x1, y), (x1, y + end))
+        self.shape.draw_bezier((x1, y + end), (middle + 1, y + 1.5), (middle - 1, y + 1.5), (x0, y + end))
+        if blunt:
+            self.shape.draw_line((x0, y + end), (x0, y))
         self.shape.finish(color=None, fill=BLACK, closePath=True)
 
     def rest(self, stave: Stave, x: float, kind: str) -> pymupdf.Rect:
@@ -186,31 +237,39 @@ class Engraver:
         self.glyph(name, stave.left + 1.0, stave.y(4) - SHAPES[name][1] / 2)
 
     def sign(self, stave: Stave, name: str, x: float, step: int) -> None:
-        """An accidental (or a key signature's) centred on `step`."""
-        self.glyph(name, x, stave.y(step) - SHAPES[name][1] / 2)
+        """An accidental (or a key signature's) for `step`: a sharp or natural
+        centred on it, a flat with its bulb on it, its stem rising above."""
+        height = SHAPES[name][1]
+        top = stave.y(step) + 0.7 * GAP - height if name == "flat" else stave.y(step) - height / 2
+        self.glyph(name, x, top)
 
     # --- output -------------------------------------------------------------------
 
     def save(self, path: Path) -> Path:
+        self._flush()
         self.shape.commit()
         self.doc.save(path)
         return path
 
     def catalogue(self, pdf: Path, piece: Path) -> Path:
         """Name every fingerprint drawn (glyphs.json), matching each filled
-        path in the saved PDF to the symbol drawn at its place."""
+        shape in the saved PDF (each glyph of a merged path) to the symbol
+        drawn at its place."""
         import vector
         glyphs = {}
         with pymupdf.open(pdf) as doc:
-            for d in doc[0].get_drawings():
-                if d.get("fill") is None:
-                    continue
-                r = d["rect"]
-                for rect, name in self.drawn:
-                    if abs(r.x0 - rect.x0) < 0.3 and abs(r.y0 - rect.y0) < 0.3 and \
-                            abs(r.x1 - rect.x1) < 0.3 and abs(r.y1 - rect.y1) < 0.3:
-                        glyphs[vector.fingerprint(d)] = {"name": name}
-                        break
+            for page in doc:
+                drawings = page.get_drawings()
+                split = vector.merges_glyphs(drawings)
+                for d in drawings:
+                    if d.get("fill") is None:
+                        continue
+                    for key, r in vector.filled_shapes(d, split):
+                        for number, rect, name in self.drawn:
+                            if number == page.number and abs(r.x0 - rect.x0) < 0.3 and abs(r.y0 - rect.y0) < 0.3 \
+                                    and abs(r.x1 - rect.x1) < 0.3 and abs(r.y1 - rect.y1) < 0.3:
+                                glyphs[key] = {"name": name}
+                                break
         path = piece / "glyphs.json"
         path.write_text(json.dumps({"glyphs": glyphs}), encoding="utf-8")
         return path
