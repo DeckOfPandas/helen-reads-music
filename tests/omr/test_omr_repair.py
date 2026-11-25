@@ -345,6 +345,78 @@ def test_slash_bars():
     assert [n.findtext("notehead") for n in root.iter("note")] == ["slash"] * 4
 
 
+def _timed(beats: int, beat_type: int = 4, divisions: str = "") -> str:
+    return (f"<attributes>{divisions}<time><beats>{beats}</beats><beat-type>{beat_type}</beat-type></time>"
+            "</attributes>")
+
+
+def test_a_time_change_one_part_missed_is_written_in_and_its_rests_follow():
+    first = "<divisions>4</divisions>"
+    piano = part("P1", [rest_bar(1, 16, _timed(4, divisions=first)), rest_bar(2, 8, _timed(2)),
+                        rest_bar(3, 16, _timed(4))])
+    voice = part("P2", [rest_bar(1, 16, _timed(4, divisions=first)), rest_bar(2, 8, _timed(2)),
+                        rest_bar(3, 8)])                   # Audiveris missed the 4/4 back at bar 3
+    root = build([("P1", "Piano", piano), ("P2", "Voice", voice)])
+    report = repair.repair(root, {})
+    assert "time changes another part had, written in: Voice bar 3 (4/4)" in report
+    bar3 = root.findall("part")[1].findall("measure")[2]
+    assert bar3.findtext("attributes/time/beats") == "4"
+    assert bar3.find("note").findtext("duration") == "16"      # the whole-bar rest, a full 4/4 again
+    assert score.bad_bars(root.findall("part")[1]) == []
+
+
+def test_parts_that_change_to_different_times_leave_the_others_alone():
+    first = "<divisions>4</divisions>"
+    a = part("P1", [rest_bar(1, 16, _timed(4, divisions=first)), rest_bar(2, 12, _timed(3))])
+    b = part("P2", [rest_bar(1, 16, _timed(4, divisions=first)), rest_bar(2, 12, _timed(6, 8))])
+    c = part("P3", [rest_bar(1, 16, _timed(4, divisions=first)), rest_bar(2, 16)])
+    root = build([("P1", "A", a), ("P2", "B", b), ("P3", "C", c)])
+    assert repair.align_time_changes(root.findall("part")) == []
+    assert root.findall("part")[2].findall("measure")[1].find("attributes") is None
+
+
+def _two_voices(lower_ticks: int, upper: int = 4) -> str:
+    """Four crotchets (or `upper`) over a minim chord in voice 2 lasting `lower_ticks` (divisions 4)."""
+    notes = "".join(f"<note><pitch><step>G</step><octave>4</octave></pitch><duration>4</duration>"
+                    f"<voice>1</voice><type>quarter</type></note>" for _ in range(upper))
+    lower = "".join(f"<note>{'<chord/>' if i else ''}<pitch><step>{s}</step><octave>4</octave></pitch>"
+                    f"<duration>{lower_ticks}</duration><voice>2</voice></note>" for i, s in enumerate("CE"))
+    return f"{notes}<backup><duration>{4 * upper}</duration></backup>{lower}"
+
+
+def test_a_second_voice_that_stops_early_is_finished_with_an_invisible_rest():
+    bar = f'<measure number="1">{_timed(4, divisions="<divisions>4</divisions>")}{_two_voices(8)}</measure>'
+    root = build([("P1", "Piano", f'<part id="P1">{bar}</part>')])
+    assert [b.number for b in score.bad_bars(root.find("part"))] == ["1"]
+    assert repair.pad_short_voices(root) == ["Piano bar 1 voice 2"]
+    rest = root.find(".//note[@print-object='no']")
+    assert rest.find("rest") is not None and rest.findtext("duration") == "8" and rest.findtext("voice") == "2"
+    assert score.bad_bars(root.find("part")) == []
+
+
+def test_padding_a_voice_that_starts_mid_bar_leaves_the_next_voice_in_place():
+    # Voice 1 fills the bar; voice 2 is one crotchet from beat 3 (a backup of
+    # only two crotchets); then voice 5 on stave 2 from the bar's start.
+    crotchet = ("<note><pitch><step>{s}</step><octave>4</octave></pitch><duration>4</duration>"
+                "<voice>{v}</voice><staff>{st}</staff></note>")
+    bar = (f'<measure number="1">{_timed(4, divisions="<divisions>4</divisions>")}'
+           + crotchet.format(s="G", v=1, st=1) * 4 + "<backup><duration>8</duration></backup>"
+           + crotchet.format(s="C", v=2, st=1) + "<backup><duration>12</duration></backup>"
+           + crotchet.format(s="E", v=5, st=2) * 4 + "</measure>")
+    root = build([("P1", "Piano", f'<part id="P1">{bar}</part>')])
+    assert repair.pad_short_voices(root) == ["Piano bar 1 voice 2"]
+    measure = root.find("part/measure")
+    assert [b.findtext("duration") for b in measure.findall("backup")] == ["8", "16"]   # voice 5 still at 0
+    assert [n.findtext("duration") for n in measure.findall("note") if n.findtext("voice") == "2"] == ["4", "4"]
+
+
+def test_a_bar_no_voice_fills_is_left_for_the_check():
+    bar = f'<measure number="1">{_timed(4, divisions="<divisions>4</divisions>")}{_two_voices(8, upper=3)}</measure>'
+    root = build([("P1", "Piano", f'<part id="P1">{bar}</part>')])
+    assert repair.pad_short_voices(root) == []
+    assert root.find(".//note[@print-object='no']") is None
+
+
 def test_drum_triplets_carry_their_ratio_and_one_bracket_each():
     root = build([("P1", "Drum Set", f'<part id="P1">{drum_bar(1, KICK_ONLY, True)}</part>')])
     # Triplet quavers, then a triplet crotchet and quaver, then a plain minim.
