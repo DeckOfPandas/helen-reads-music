@@ -149,6 +149,12 @@ Then read `omr/merge-report.txt` from top to bottom:
   (`octave_clefs`).
 - **lyrics dropped as unreadable:** text Audiveris read badly; check that no
   real lyric is among them.
+- **text layer:** where the PDF keeps its words as text (MuseScore's do),
+  the lyrics, chord symbols and singers' names written from it, any NOT
+  PLACED, and the other text above the systems it left out (a tempo, a
+  "sub." beside a dynamic): put those in by hand if they matter.
+- **dynamics** (in the drawing check's lines): those dropped because the
+  bar draws none, and those written because the score lacked them.
 
 To see a bar as printed:
 
@@ -178,8 +184,10 @@ For each bar still wrong, decide where the fix belongs:
 
 Things the tools cannot do yet:
 - read tuplets or grace notes from the drawing;
-- read text from the drawing (the PDF draws its letters as shapes), so
-  lyrics are only what Audiveris read;
+- read text a PDF draws as shapes, so there lyrics are only what Audiveris
+  read (a PDF that keeps its words as text has them read, `textlayer.py`);
+- place text other than lyrics, chord symbols and singers' names (tempo,
+  "sub.", "rit.") from the text layer;
 - read fingered tremolos from a scan.
 
 Say which of these you met.
@@ -208,9 +216,12 @@ Follow the end-of-work list in `CLAUDE.md`, and add:
   Sibelius then warns that the file is "an old version of MusicXML".
   `score.save` writes 4.0 and the DOCTYPE. Anything that writes MusicXML
   another way brings the warning back.
-- **A missing word may be unrecoverable.** The PDF draws its letters as
-  shapes and has no text layer, so a lyric Audiveris never read is gone
+- **A missing word may be unrecoverable.** Where the PDF draws its letters
+  as shapes and has no text layer, a lyric Audiveris never read is gone
   until someone patches it. Say which ones, with their bars.
+- **`process.py` reads a piece that has no read yet.** Re-running other
+  pieces to check a tool change runs Audiveris on any of them not read
+  before: re-run only pieces with an `omr/<piece>-merged.mxl`.
 - **A green check is not a right score.** 0 bars that don't add up proves
   the rhythms fill the bars, not that the notes are right. The drawing check
   and your eye on the page are the proof.

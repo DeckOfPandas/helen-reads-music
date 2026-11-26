@@ -79,12 +79,18 @@ reading adds up and differs from the score, it wins:
   leaves without rests padded with invisible ones where its gaps are;
 - an octave clef's small 8 is drawn on every system and a read can miss it
   on some: the clef gets the 8 the page shows, and the notes read under the
-  wrong clef move by the octave.
+  wrong clef move by the octave;
+- where the drawing names its dynamics (SMuFL's name themselves; elsewhere
+  name them `dynamic` in `glyphs.json`), a dynamic the score has in a bar
+  that draws none is dropped (Audiveris reads chord-box dots and fret
+  numbers as p and f), and a SMuFL dynamic drawn where its part has none is
+  written in.
 
 A bar whose drawing does not add up (tuplets, grace notes) is reported, not
 changed. Nor is a drum bar holding grace notes (flams): the drawing reads
-none, so it is compared and reported, never rewritten. Text is drawn as shapes too, and not read: lyrics are what
-Audiveris read. Bars patched by hand are left alone; after the patches they
+none, so it is compared and reported, never rewritten. Text drawn as shapes
+is not read: lyrics are then what Audiveris read. Text kept as text is
+("Words from the text layer"). Bars patched by hand are left alone; after the patches they
 are checked against the drawing, which only adds ties it sees: a tie can
 hide from it behind another voice's notes, so it removes none. A scanned
 PDF has no drawing, and no `glyphs.json` means no check.
@@ -119,6 +125,29 @@ in `"transpose"`.
 To check a bar by eye, `vector.py picture library/<piece> <page> <stave>
 <first bar> <last bar>` writes a PNG of it to `omr/views/bars/`.
 `merge-report.txt` says which stave is which part on each page.
+
+## Words from the text layer
+
+Some software (MuseScore) keeps a score's words as text in the PDF: every
+lyric syllable, chord symbol and singer's name at an exact place.
+Audiveris only guesses at the letters, and reads chord boxes and fret
+numbers as words. After the drawing check, `textlayer.py` writes the
+words from the text layer instead, placed against the drawing:
+
+- lyrics: words between a vocal part's stave (`"vocal_parts"`) and the
+  stave below, one verse per baseline, each on the note whose drawn head it
+  is centred under; a drawn hyphen joins syllables, a drawn line under one
+  is an extender;
+- chord symbols: a group of words above the system that all read as chords
+  (`F♯7sus4`, `Bm/F♯`, `N.C.`), each at the drawn note its left edge sits
+  over, in the score's top part (`"chords_part"` to choose another);
+- singers' names: other words above the system ending ":", written above
+  the vocal part.
+
+Where it writes lyrics or chords, Audiveris's are dropped, and so is every
+direction of words alone that the page does not print in that bar ("cresc."
+printed there is kept). Other text above the systems (title, tempo) is
+listed in the report, not written.
 
 ## Guitar tablature
 
@@ -214,7 +243,17 @@ call:
 | `"drop": ["P12"]` | A part read from something that isn't music (a line of text): taken out, its notes reported |
 | `"borrow_rests": false` | Turns off putting back rests a short bar is missing, copied from a matching bar elsewhere |
 | `"drawing_check": false` | Turns off checking and correcting against the PDF's drawing |
+| `"text_layer": false` | Turns off writing lyrics, chord symbols and names from the PDF's text layer |
+| `"chords_part": "Piano"` | The part chord symbols from the text layer go in (default: the score's top part) |
 | `"doublings": false` | Turns off filling bars from the parts that double them |
+
+Always, with no key: a time change any part has is written into the parts
+that missed it (Audiveris reads time signatures stave by stave), and their
+whole-bar rests follow it. Where the PDF is a drawing, a voice that stops
+before the end of a bar another voice fills is finished with an invisible
+rest: notation software draws no rest there once a lower voice's last note
+is over. On a scan that short voice may be lost notes, so it is left for
+the check to report.
 
 ## Checking what came out
 
@@ -256,6 +295,7 @@ stave, then copy out the wanted parts:
 | `vector.py` | The PDF's drawing: staves, bar lines, stems, named shapes; `survey` makes `glyphs.json`, `picture` shows bars |
 | `vector_read.py` | One bar of one stave read from the drawing: notes, lengths, ties, voices, pitches |
 | `drawing_check.py` | The score checked and corrected against the drawing |
+| `textlayer.py` | Lyrics, chord symbols and singers' names from the PDF's text layer |
 | `doublings.py` | Parts that double each other, filling each other's broken bars |
 
 Each one's `--help` (or its docstring) says what it does and why. Tests are

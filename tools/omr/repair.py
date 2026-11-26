@@ -144,18 +144,58 @@ def _insert_in_order(attributes: ET.Element, child: ET.Element) -> None:
     attributes.insert(position, child)
 
 
-def _first_attributes(part: ET.Element) -> ET.Element | None:
-    first = part.find("measure")
-    if first is None:
-        return None
-    attributes = first.find("attributes")
+def _measure_attributes(measure: ET.Element) -> ET.Element:
+    """The bar's opening <attributes>, made after any <print> if it has none."""
+    attributes = measure.find("attributes")
     if attributes is None:
         attributes = ET.Element("attributes")
         position = 0
-        while position < len(first) and first[position].tag == "print":
+        while position < len(measure) and measure[position].tag == "print":
             position += 1
-        first.insert(position, attributes)
+        measure.insert(position, attributes)
     return attributes
+
+
+def _first_attributes(part: ET.Element) -> ET.Element | None:
+    first = part.find("measure")
+    return None if first is None else _measure_attributes(first)
+
+
+def _written_time(measure: ET.Element) -> tuple[str, str] | None:
+    times = [t for a in measure.findall("attributes") for t in a.findall("time")]
+    return (times[-1].findtext("beats"), times[-1].findtext("beat-type")) if times else None
+
+
+def align_time_changes(parts: list[ET.Element], names: dict[str, str] | None = None) -> list[str]:
+    """Every part changes time where any part does. Audiveris reads a time
+    signature stave by stave and can miss one, and the part then runs on in
+    the old time, its whole-bar rests sized to it. A change written into
+    parts that disagree (two different times at one bar) is left alone."""
+    changes: dict[str, set] = {}
+    for part in parts:
+        for measure in part.findall("measure"):
+            written = _written_time(measure)
+            if written:
+                changes.setdefault(measure.get("number"), set()).add(written)
+    report = []
+    for part in parts:
+        in_force = None
+        for measure in part.findall("measure"):
+            number = measure.get("number")
+            written = _written_time(measure)
+            if written:
+                in_force = written
+                continue
+            wanted = changes.get(number, set())
+            if len(wanted) != 1 or next(iter(wanted)) == in_force:
+                continue
+            beats, beat_type = in_force = next(iter(wanted))
+            element = ET.Element("time")
+            ET.SubElement(element, "beats").text = beats
+            ET.SubElement(element, "beat-type").text = beat_type
+            _insert_in_order(_measure_attributes(measure), element)
+            report.append(f"{(names or {}).get(part.get('id'), part.get('id'))} bar {number} ({beats}/{beat_type})")
+    return report
 
 
 def write_time(part: ET.Element, time: str) -> bool:
@@ -1652,6 +1692,88 @@ def _voice_span(measure: ET.Element, voice: str, divisions: Fraction) -> Fractio
                for group in _voice_events(measure, voice))
 
 
+def _voice_ends(measure: ET.Element) -> dict[str, tuple[Fraction, ET.Element]]:
+    """Per voice, where its last note ends (in divisions) and that note."""
+    ends: dict[str, tuple[Fraction, ET.Element]] = {}
+    cursor = Fraction(0)
+    for element in measure:
+        length = Fraction(element.findtext("duration") or 0)
+        if element.tag == "backup":
+            cursor -= length
+        elif element.tag == "forward":
+            cursor += length
+        elif element.tag == "note" and element.find("grace") is None:
+            if element.find("chord") is None:
+                cursor += length
+            voice = element.findtext("voice") or "1"
+            if voice not in ends or cursor >= ends[voice][0]:
+                ends[voice] = (cursor, element)
+    return ends
+
+
+def _shift_after(measure: ET.Element, position: int, ticks: int) -> None:
+    """Keep what follows `position` where it was, after `ticks` were added
+    there: the next backup goes back that much further, a forward goes that
+    much less far, and notes straight after get a backup before them."""
+    for index in range(position, len(measure)):
+        element = measure[index]
+        if element.tag == "backup":
+            element.find("duration").text = str(int(element.findtext("duration")) + ticks)
+            return
+        if element.tag == "forward":
+            remaining = int(element.findtext("duration")) - ticks
+            if remaining > 0:
+                element.find("duration").text = str(remaining)
+            else:
+                measure.remove(element)
+                if remaining < 0:
+                    _shift_after(measure, index, -remaining)
+            return
+        if element.tag == "note":
+            backup = ET.Element("backup")
+            ET.SubElement(backup, "duration").text = str(ticks)
+            measure.insert(index, backup)
+            return
+
+
+def pad_short_voices(root: ET.Element, assume: Fraction | None = None) -> list[str]:
+    """Finish with an invisible rest each voice that stops before the end
+    of a bar another voice fills. Notation software leaves a second voice's
+    rests undrawn once its last note is over (a minim chord under four
+    quavers), so the page shows nothing there, but a bar whose voices end
+    at different places does not add up."""
+    report = []
+    names = dict(score.part_names(root))
+    for part in root.findall("part"):
+        for measure, state in zip(part.findall("measure"), merge.attribute_states(part)):
+            divisions = _divisions(measure, state)
+            own = [t for t in (score._time_signature(a) for a in measure.findall("attributes")) if t is not None]
+            expected = own[-1] if own else (score._time_signature(_wrap(state[("time", "1")]))
+                                            if ("time", "1") in state else assume)
+            if divisions is None or expected is None:
+                continue
+            full = expected * divisions
+            ends = _voice_ends(measure)
+            if not ends or max(end for end, _ in ends.values()) != full:
+                continue
+            for voice, (end, last) in sorted(ends.items()):
+                if end >= full:
+                    continue
+                pad = int(full - end)
+                rest = ET.Element("note", {"print-object": "no"})
+                ET.SubElement(rest, "rest")
+                ET.SubElement(rest, "duration").text = str(pad)
+                ET.SubElement(rest, "voice").text = voice
+                if last.findtext("staff"):
+                    ET.SubElement(rest, "staff").text = last.findtext("staff")
+                position = list(measure).index(last) + 1
+                measure.insert(position, rest)
+                _shift_after(measure, position + 1, pad)
+                report.append(f"{names.get(part.get('id'), part.get('id'))} bar {measure.get('number')} "
+                              f"voice {voice}")
+    return report
+
+
 def _fix_following_backup(measure: ET.Element, voice: str, divisions: Fraction) -> None:
     """The backup after a voice's last note returns to the bar's start."""
     elements = list(measure)
@@ -1843,6 +1965,9 @@ def repair(root: ET.Element, config: dict) -> list[str]:
         score.parse_time(time)
         written = sum(write_time(p, time) for p in parts.values())
         report.append(f"time {time} written into {written} part(s)")
+    aligned = align_time_changes(list(parts.values()), names)
+    if aligned:
+        report.append(f"time changes another part had, written in: {', '.join(aligned)}")
 
     transpose = config.get("transpose") or {}
     unknown = sorted(set(transpose) - set(by_name))

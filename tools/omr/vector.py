@@ -35,7 +35,9 @@ flag-8th-down, flag-16th-up, flag-16th-down, dot (augmentation), dot-small
 hi-hat), flat, sharp, natural, clef-treble, clef-bass, clef-alto,
 clef-percussion, clef-treble-8vb and clef-bass-8vb (one shape with its
 small 8 below), clef-8 (the small 8 under or over a clef, drawn on its
-own), other (anything else: text, dynamics, slurs).
+own), dynamic (p, f, sfz...: SMuFL's name themselves; naming any in a
+catalogue turns on the drawing check of dynamics), other (anything else:
+text, slurs).
 """
 from __future__ import annotations
 
@@ -288,6 +290,14 @@ SMUFL: dict[int, tuple[str, tuple[float, float, float, float]]] = {
 }
 
 
+def smufl_name(code: int) -> str:
+    """A SMuFL character's name here: from SMUFL, "dynamic" for SMuFL's
+    dynamics block (p, f, sfz, fp...), else "other"."""
+    if code in SMUFL:
+        return SMUFL[code][0]
+    return "dynamic" if 0xE520 <= code <= 0xE54F else "other"
+
+
 def smufl_glyphs(page) -> list[Glyph]:
     """Every character of a private-use codepoint (SMuFL's range) on the
     page, as a glyph keyed "smufl:<hex>" and named from SMUFL ("other" for
@@ -298,7 +308,7 @@ def smufl_glyphs(page) -> list[Glyph]:
         for code, _, origin, bbox in span["chars"]:
             if not 0xE000 <= code <= 0xF8FF:
                 continue
-            name, box = SMUFL.get(code, ("other", None))
+            name, box = SMUFL.get(code, (smufl_name(code), None))
             if box is None:
                 x0, y0, x1, y1 = bbox
             else:
@@ -476,7 +486,7 @@ def load_catalogue(piece: Path) -> dict[str, str]:
 def name_glyphs(page: Page, catalogue: dict[str, str]) -> None:
     """Names from the catalogue; a SMuFL character not in it keeps its own."""
     for glyph in page.glyphs:
-        own = SMUFL.get(int(glyph.key[6:], 16), ("other",))[0] if glyph.key.startswith("smufl:") else "other"
+        own = smufl_name(int(glyph.key[6:], 16)) if glyph.key.startswith("smufl:") else "other"
         glyph.name = catalogue.get(glyph.key, own)
     _place_by_ledgers(page)
 
@@ -588,8 +598,8 @@ def write_draft(piece: Path, clusters: dict, minimum: int = 3) -> Path:
     for key, entry in sorted(clusters.items(), key=lambda kv: -kv[1]["count"]):
         if entry["count"] < minimum and key not in existing:
             continue
-        if key.startswith("smufl:"):
-            name = existing.get(key) or SMUFL.get(int(key[6:], 16), ("other",))[0]
+        if key.startswith("smufl:"):                # the font names it: a draft "other" gives way
+            name = existing.get(key) if existing.get(key) not in (None, "other") else smufl_name(int(key[6:], 16))
         else:
             name = existing.get(key) or guess_name(entry["width"], entry["height"], entry["kinds"], entry["gap"])
         glyphs[key] = {"name": name, "count": entry["count"], "size": [entry["width"], entry["height"]],

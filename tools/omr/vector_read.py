@@ -285,9 +285,11 @@ def read_bar(page: vector.Page, beams: list[Beam], stave_index: int, bar: int,
         event.stem_x = stem.x
     loose.sort(key=lambda e: e.x)
     merged_loose: list[Event] = []
-    for event in loose:                                         # stemless heads at one x are a chord
-        if merged_loose and abs(event.x - merged_loose[-1].x) < gap * 0.5 and \
-                event.length == merged_loose[-1].length:
+    for event in loose:                                         # stemless heads at one x are a chord,
+        last = merged_loose[-1] if merged_loose else None      # a second's upper head a head aside
+        second = last is not None and abs(event.x - last.x) < gap * 2 and \
+            any(abs(h.step - event.heads[0].step) == 1 for h in last.heads)
+        if last is not None and (abs(event.x - last.x) < gap * 0.5 or second) and event.length == last.length:
             merged_loose[-1].heads += event.heads
         else:
             merged_loose.append(event)
@@ -434,12 +436,15 @@ def _find_tremolos(events: list[Event], beams: list[Beam], gap: float, expected:
 def split_voices(events: list[Event], rests: list[Event], stave: vector.Stave,
                  expected: Fraction | None, prefer_two: bool = False) -> dict[str, list[Event]]:
     """One voice, unless that does not add up (or `prefer_two`, for drums)
-    and the bar has both up- and down-stems: then up and down voices, rests
-    to the half of the stave they sit in. In a single pitched line stems
-    point either way with the pitch, so stem direction alone is no voice."""
+    and the bar has both up- and down-stems, or stems one way and a stemless
+    note (a whole note under a line of stems-up notes): then up and down
+    voices, rests to the half of the stave they sit in. In a single pitched
+    line stems point either way with the pitch, so stem direction alone is
+    no voice."""
     single = {"single": sorted(events + rests, key=lambda e: e.x)}
     directions = {e.stem for e in events if e.stem}
-    if directions != {"up", "down"}:
+    stemless = any(e.stem is None for e in events)
+    if directions != {"up", "down"} and not (len(directions) == 1 and stemless):
         return single
     if not prefer_two and (expected is None or adds_up(single, expected)):
         return single
@@ -447,7 +452,10 @@ def split_voices(events: list[Event], rests: list[Event], stave: vector.Stave,
     base = {"up": [e for e in events if e.stem == "up"], "down": [e for e in events if e.stem == "down"]}
     for event in events:
         if event.stem is None:
-            base["up" if event.heads[0].y < middle else "down"].append(event)
+            if len(directions) == 1:                            # opposite the one stemmed line
+                base["down" if directions == {"up"} else "up"].append(event)
+            else:
+                base["up" if event.heads[0].y < middle else "down"].append(event)
     preferred = ["up" if rest.y < middle else "down" for rest in rests]
     # Each rest to either voice, nearest the preferred assignment first: a
     # tall crotchet rest can straddle the middle line.

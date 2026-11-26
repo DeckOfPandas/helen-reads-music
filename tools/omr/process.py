@@ -321,6 +321,18 @@ def process(piece: Path, force: bool = False, run=None,
                                  *(f"  {line}" for line in patched)]
                 if table.get("drawing_check", True):
                     merge_report += ["", *drawing_pass(root, piece, table, assume_time, patched_only=True)]
+            if table.get("text_layer", True):
+                try:
+                    merge_report += ["", *text_pass(root, piece, table, assume_time)]
+                except ValueError as err:
+                    return False, notes + [f"merge.json: {err}"]
+            if drawn(piece):
+                padded = repair.pad_short_voices(root, assume_time)
+                merge_report += ["", f"voices finished with an invisible rest: {len(padded)}",
+                                 *(f"  {line}" for line in padded)]
+            else:
+                merge_report += ["", "voices not finished with invisible rests: with no drawing to show "
+                                     "the page leaves them blank, a short voice may be lost notes"]
             merge_report += ["", *repair.voice_drum_parts(root, table.get("drum_key"))]
             labels = dict(table.get("labels") or {})
             try:
@@ -371,6 +383,36 @@ def drawing_pass(root: score.ET.Element, piece: Path, table: dict, assume_time,
                 *(f"  {f.describe()}" for f in findings)]
     _, report = drawing_check.check(root, piece, pdfs, fix=True, assume=assume_time, skip=skip)
     return report
+
+
+def drawn(piece: Path) -> bool:
+    """Whether the piece's PDFs are a drawing the tools can read: named
+    shapes (glyphs.json) or SMuFL characters."""
+    import vector
+    pdfs = vector.piece_pdfs(piece)
+    if not pdfs:
+        return False
+    try:
+        import pymupdf  # noqa: F401
+    except ImportError:
+        return False
+    return bool(vector.load_catalogue(piece)) or vector.has_smufl(pdfs)
+
+
+def text_pass(root: score.ET.Element, piece: Path, table: dict, assume_time) -> list[str]:
+    """Lyrics, chord symbols and singers' names from the PDFs' text layer
+    (textlayer.py), where the PDFs keep their words as text. Report lines."""
+    import vector
+    pdfs = vector.piece_pdfs(piece)
+    if not pdfs:
+        return ["text layer: no PDFs in the piece; skipped"]
+    try:
+        import pymupdf  # noqa: F401
+    except ImportError:
+        return ["text layer: PyMuPDF is not installed; skipped"]
+    import textlayer
+    return textlayer.place(root, piece, pdfs, assume_time, table.get("vocal_parts", ["Voice"]),
+                           table.get("chords_part"))
 
 
 def second_opinion(primary: score.ET.Element, second: Path, table: dict, assume_time) -> list[str]:

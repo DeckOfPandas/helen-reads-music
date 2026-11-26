@@ -65,6 +65,7 @@ SHAPES = {
     "time-3": (3.0, 3.0, "polygon", 18),
     "time-4": (3.0, 3.0, "polygon", 19),
     "clef-8": (2.0, 3.0, "polygon", 31),
+    "dynamic": (4.0, 4.0, "polygon", 32),
     **{f"fret-{n}": (1.75, 2.5, "polygon", 20 + n) for n in range(10)},    # tab digits, one shape each
 }
 
@@ -242,6 +243,18 @@ class Engraver:
         height = SHAPES[name][1]
         top = stave.y(step) + 0.7 * GAP - height if name == "flat" else stave.y(step) - height / 2
         self.glyph(name, x, top)
+
+    def text(self, x: float, baseline: float, words: str, size: float = 8.0, centre: bool = False) -> float:
+        """Words as text (a text layer, as MuseScore writes lyrics and chord
+        symbols), from x or centred on it; returns the right edge."""
+        width = pymupdf.get_text_length(words, fontname="helv", fontsize=size)
+        left = x - width / 2 if centre else x
+        self.shape.insert_text((left, baseline), words, fontsize=size, fontname="helv")
+        return left + width
+
+    def line(self, x0: float, x1: float, y: float) -> None:
+        """A thin horizontal line: a lyric hyphen or extender."""
+        self._line(x0, y, x1, y, 0.4)
 
     # --- output -------------------------------------------------------------------
 

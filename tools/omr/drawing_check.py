@@ -56,6 +56,56 @@ class Slot:
     bars: dict[str, Counter] = field(default_factory=dict)       # bar number -> counts
 
 
+@dataclass
+class DrawnSystem:
+    page_number: int
+    pdf: Path
+    index: int                       # the page within its PDF
+    page: vector.Page
+    beams: list
+    curves: list
+    staves: list[int]                # the page's stave indexes in this system, top first
+    bars: list[str]                  # the score's bar numbers the system holds
+    mapping: dict[int, int | None]   # stave index -> its slot (part and staff), or None
+
+
+def drawn_systems(root: ET.Element, piece: Path, pdfs: list[Path]) -> tuple[list[DrawnSystem], list[Slot], list[str]]:
+    """Every drawn system, with its bars and which part each stave is: the
+    systems, the score's slots, and notes on pages with no staves. Empty
+    without glyph names (glyphs.json) or SMuFL text."""
+    import pymupdf
+    catalogue = vector.load_catalogue(piece)
+    if not catalogue and not vector.has_smufl(pdfs):
+        return [], [], []
+    slots = _read_counts(root)
+    numbers = [m.get("number") for m in root.find("part").findall("measure")]
+    notes_lines = []
+    found = []
+    for page_number, (pdf, index) in enumerate(vector.pdf_pages(pdfs), start=1):
+        with pymupdf.open(pdf) as doc:
+            pg = doc[index]
+            page = vector.read_page(pg)
+            beams = vector_read.beams_on_page(pg)
+            curves = vector_read.curves_on_page(pg)
+        if not page.staves:
+            notes_lines.append(f"page {page_number}: no staves drawn (a scan?)")
+            continue
+        vector.name_glyphs(page, catalogue)
+        found += [(page_number, pdf, index, page, beams, curves, system) for system in page.systems(len(slots))]
+    systems = []
+    first = 0
+    for page_number, pdf, index, page, beams, curves, system in found:
+        count = page.bar_count(system[0])
+        bars = numbers[first:first + count]
+        first += count
+        if not bars:
+            break
+        drawn_counts = [_drawn_counts(page, s) for s in system]
+        mapping = dict(zip(system, _match_staves(drawn_counts, slots, bars)))
+        systems.append(DrawnSystem(page_number, pdf, index, page, beams, curves, system, bars, mapping))
+    return systems, slots, notes_lines
+
+
 def _staves_of(part: ET.Element) -> int:
     return max((int(a.findtext("staves")) for a in part.iter("attributes") if a.findtext("staves")), default=1)
 
@@ -706,39 +756,19 @@ def check(root: ET.Element, piece: Path, pdfs: list[Path], fix: bool = True,
     notes of the (part, bar) pairs in `skip` are left alone, unchecked;
     with `only`, just those pairs' notes are checked, and only their ties
     corrected."""
-    import pymupdf
     skip = skip or set()
-    catalogue = vector.load_catalogue(piece)
-    if not catalogue and not vector.has_smufl(pdfs):
+    systems, slots, notes_lines = drawn_systems(root, piece, pdfs)
+    if not slots:
         return [], ["drawing check: no glyphs.json for this piece (vector.py survey makes one); skipped"]
-    slots = _read_counts(root)
-    numbers = [m.get("number") for m in root.find("part").findall("measure")]
     parts = {name: p for (pid, name), p in zip(score.part_names(root), root.findall("part"))}
     findings: list[Finding] = []
-    notes_lines = []
     layout = []
     counts = Counter()
-    first = 0
-    systems = []                                    # (page number, page, beams, curves, staves of one system)
-    for page_number, (pdf, index) in enumerate(vector.pdf_pages(pdfs), start=1):
-        with pymupdf.open(pdf) as doc:
-            pg = doc[index]
-            page = vector.read_page(pg)
-            beams = vector_read.beams_on_page(pg)
-            curves = vector_read.curves_on_page(pg)
-        if not page.staves:
-            notes_lines.append(f"page {page_number}: no staves drawn (a scan?)")
-            continue
-        vector.name_glyphs(page, catalogue)
-        systems += [(page_number, page, beams, curves, system) for system in page.systems(len(slots))]
-    for page_number, page, beams, curves, system in systems:
-        count = page.bar_count(system[0])
-        bars = numbers[first:first + count]
-        first += count
-        if not bars:
-            break
-        drawn_counts = {s: _drawn_counts(page, s) for s in system}
-        mapping = dict(zip(system, _match_staves([drawn_counts[s] for s in system], slots, bars)))
+    for drawn_system in systems:
+        page_number, page, beams, curves = (drawn_system.page_number, drawn_system.page,
+                                            drawn_system.beams, drawn_system.curves)
+        bars, mapping = drawn_system.bars, drawn_system.mapping
+        drawn_counts = {s: _drawn_counts(page, s) for s in drawn_system.staves}
         layout.append(f"page {page_number} (bars {bars[0]}-{bars[-1]}): " + ", ".join(
             f"{stave}={slots[j].part}" + (f"/{slots[j].staff}" if _staves_of(parts[slots[j].part]) > 1 else "")
             for stave, j in mapping.items() if j is not None))
@@ -870,6 +900,7 @@ def check(root: ET.Element, piece: Path, pdfs: list[Path], fix: bool = True,
                 finding.fixed = True
                 finding.what += "; replaced by the drawing's reading"
                 counts["replaced"] += 1
+    matched = _match_dynamics(systems, slots, parts, assume) if fix and only is None else None
     fixed = sum(f.fixed for f in findings)
     report = [f"drawing check: {len(findings)} difference(s) between drawing and score, {fixed} fixed "
               f"({counts['rests']} by putting back rests, {counts['ties']} by setting ties, {counts['replaced']} "
@@ -877,10 +908,160 @@ def check(root: ET.Element, piece: Path, pdfs: list[Path], fix: bool = True,
               f"{counts['drum bars written']} drum bar(s) written "
               f"from the drawing"]
     report += [f"  {f.describe()}" for f in findings]
+    if matched is not None:
+        undrawn, added = matched
+        report.append(f"  dynamics in bars that draw none, dropped: {len(undrawn)}"
+                      + (f" ({', '.join(undrawn)})" if undrawn else ""))
+        report.append(f"  dynamics drawn that the score lacked, written: {len(added)}"
+                      + (f" ({', '.join(added)})" if added else ""))
     report += [f"  {line}" for line in notes_lines]
     report += ["", "drawn staves matched to parts (stave numbers from the top of the page, from 0):"]
     report += [f"  {line}" for line in layout]
     return findings, report
+
+
+def onsets(measure: ET.Element) -> list[tuple[Fraction, ET.Element]]:
+    """Each note's (or rest's) onset in divisions, chord members and grace notes left out."""
+    out = []
+    cursor = Fraction(0)
+    for element in measure:
+        length = Fraction(element.findtext("duration") or 0)
+        if element.tag == "backup":
+            cursor -= length
+        elif element.tag == "forward":
+            cursor += length
+        elif element.tag == "note" and element.find("grace") is None and element.find("chord") is None:
+            out.append((cursor, element))
+            cursor += length
+    return out
+
+
+def insert_at(measure: ET.Element, element: ET.Element, ticks: Fraction) -> None:
+    """Before the first note starting at `ticks`, or at the bar's start with an <offset>."""
+    anchor = next((note for onset, note in onsets(measure) if onset == ticks), None)
+    if anchor is None:
+        anchor = next((e for e in measure if e.tag in ("note", "backup", "forward")), None)
+        if ticks:
+            offset = ET.Element("offset")
+            offset.text = str(int(ticks)) if ticks.denominator == 1 else str(float(ticks))
+            position = [c.tag for c in element].index("staff") if element.find("staff") is not None else len(element)
+            element.insert(position, offset)
+    measure.insert(list(measure).index(anchor) if anchor is not None else len(measure), element)
+
+
+def drawn_events(system: DrawnSystem, stave: int, bar: int,
+                 expected: Fraction) -> list[tuple[float, float, Fraction, bool]]:
+    """(left edge, centre, onset in crotchets, starts a sound) for each drawn
+    note and rest of a bar whose reading adds up; [] where it does not."""
+    voices = vector_read.read_bar(system.page, system.beams, stave, bar, expected, curves=system.curves)
+    if not voices or not vector_read.adds_up(voices, expected):
+        return []
+    out = []
+    for events in voices.values():
+        onset = Fraction(0)
+        for event in events:
+            if event.heads:
+                left = min(h.left if h.left is not None else h.x for h in event.heads)
+                out.append((left, event.x, onset, not all(h.tie_stop for h in event.heads)))
+            else:
+                out.append((event.x, event.x, onset, False))
+            onset += event.length
+    return out
+
+
+def bar_lengths(part: ET.Element, assume: Fraction | None) -> dict[str, tuple[Fraction, Fraction]]:
+    """Per bar number: (divisions, length in crotchets), where both are known."""
+    out = {}
+    for measure, state in zip(part.findall("measure"), merge.attribute_states(part)):
+        divisions = repair._divisions(measure, state)
+        own = [t for t in (score._time_signature(a) for a in measure.findall("attributes")) if t]
+        expected = own[-1] if own else (score._time_signature(repair._wrap(state[("time", "1")]))
+                                        if ("time", "1") in state else assume)
+        if divisions is not None and expected is not None:
+            out[measure.get("number")] = (divisions, expected)
+    return out
+
+
+# SMuFL's dynamics as MusicXML's; single letters (p, m, f, r, s, z, n) drawn side by side spell one.
+SMUFL_DYNAMICS = {
+    0xE520: "p", 0xE521: "m", 0xE522: "f", 0xE523: "r", 0xE524: "s", 0xE525: "z", 0xE526: "n",
+    0xE527: "pppppp", 0xE528: "ppppp", 0xE529: "pppp", 0xE52A: "ppp", 0xE52B: "pp", 0xE52C: "mp",
+    0xE52D: "mf", 0xE52E: "pf", 0xE52F: "ff", 0xE530: "fff", 0xE531: "ffff", 0xE532: "fffff",
+    0xE533: "ffffff", 0xE534: "fp", 0xE535: "fz", 0xE536: "sf", 0xE537: "sfp", 0xE538: "sfpp",
+    0xE539: "sfz", 0xE53A: "sfzp", 0xE53B: "sffz", 0xE53C: "rf", 0xE53D: "rfz",
+}
+MUSICXML_DYNAMICS = {"p", "pp", "ppp", "pppp", "ppppp", "pppppp", "f", "ff", "fff", "ffff", "fffff",
+                     "ffffff", "mp", "mf", "sf", "sfp", "sfpp", "fp", "rf", "rfz", "sfz", "sffz", "fz", "n",
+                     "pf", "sfzp"}
+
+
+def _drawn_dynamics(system: DrawnSystem) -> dict[tuple[int, int], list[tuple[float, str]]]:
+    """Per (stave, bar) of the system: each SMuFL dynamic drawn, (x, letters),
+    neighbouring single letters joined into one."""
+    found: dict[tuple[int, int], list[tuple[float, float, float, str]]] = defaultdict(list)
+    for g in sorted(system.page.glyphs, key=lambda g: g.x0):
+        if g.name != "dynamic" or g.stave not in system.staves or not g.key.startswith("smufl:"):
+            continue
+        letters = SMUFL_DYNAMICS.get(int(g.key[6:], 16))
+        if letters is None:
+            continue
+        group = found[(g.stave, g.bar)]
+        if group and abs(group[-1][2] - g.cy) < 1.0 and g.x0 - group[-1][1] < system.page.staves[g.stave].gap:
+            x0, _, cy, text = group[-1]
+            group[-1] = (x0, g.x1, cy, text + letters)
+        else:
+            group.append((g.x0, g.x1, g.cy, letters))
+    return {key: [(x0, text) for x0, _, _, text in group] for key, group in found.items()}
+
+
+def _match_dynamics(systems: list[DrawnSystem], slots: list[Slot], parts: dict[str, ET.Element],
+                    assume: Fraction | None) -> tuple[list[str], list[str]] | None:
+    """Take out each dynamic the score has in a bar of a system that draws
+    none there (Audiveris reads dots and lettering, a chord box or a fret
+    number, as p, f and sfz); write each SMuFL dynamic drawn where its part
+    has none in that bar, at the drawn note nearest it. Only where the
+    drawing names its dynamics (SMuFL's, or "dynamic" in glyphs.json);
+    otherwise None, nothing done. Returns (dropped, written)."""
+    if not any(g.name == "dynamic" for s in systems for g in s.page.glyphs):
+        return None
+    dropped, written = [], []
+    lengths = {name: bar_lengths(part, assume) for name, part in parts.items()}
+    for system in systems:
+        drawn_bars = {g.bar for g in system.page.glyphs if g.name == "dynamic" and g.stave in system.staves}
+        names = sorted({slots[j].part for j in system.mapping.values() if j is not None})
+        for name in names:
+            measures = {m.get("number"): m for m in parts[name].findall("measure")}
+            for k, number in enumerate(system.bars):
+                if k in drawn_bars or number not in measures:
+                    continue
+                for direction in measures[number].findall("direction"):
+                    if direction.find("direction-type/dynamics") is not None:
+                        measures[number].remove(direction)
+                        dropped.append(f"{name} {number}")
+        for (stave, k), marks in _drawn_dynamics(system).items():
+            slot = system.mapping.get(stave)
+            if slot is None or k is None or k >= len(system.bars):
+                continue
+            name, number = slots[slot].part, system.bars[k]
+            measure = next((m for m in parts[name].findall("measure") if m.get("number") == number), None)
+            if measure is None or measure.find("direction/direction-type/dynamics") is not None \
+                    or number not in lengths[name]:
+                continue
+            divisions, expected = lengths[name][number]
+            events = drawn_events(system, stave, k, expected)
+            for x, letters in marks:
+                onset = min(events, key=lambda e: abs(e[0] - x))[2] if events else Fraction(0)
+                direction = ET.Element("direction", {"placement": "below"})
+                dynamics = ET.SubElement(ET.SubElement(direction, "direction-type"), "dynamics")
+                if letters in MUSICXML_DYNAMICS:
+                    ET.SubElement(dynamics, letters)
+                else:
+                    ET.SubElement(dynamics, "other-dynamics").text = letters
+                if slots[slot].staff > 1:
+                    ET.SubElement(direction, "staff").text = str(slots[slot].staff)
+                insert_at(measure, direction, onset * divisions)
+                written.append(f"{name} {number} {letters}")
+    return dropped, written
 
 
 def _drum_signature(measure: ET.Element) -> list[tuple]:
