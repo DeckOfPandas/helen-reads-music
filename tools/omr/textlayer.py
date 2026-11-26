@@ -26,6 +26,7 @@ from pathlib import Path
 import drawing_check
 import repair
 import score
+import vector
 
 LIGATURES = {"ﬁ": "fi", "ﬂ": "fl", "ﬀ": "ff", "ﬃ": "ffi", "ﬄ": "ffl"}
 ACCIDENTAL = {"": 0, "♯": 1, "#": 1, "♭": -1, "b": -1}
@@ -58,14 +59,17 @@ class Word:
 
 def page_words(pg) -> list[Word]:
     """Every word of ordinary text on the page, split at spaces; music
-    symbols (SMuFL's private-use characters) left out."""
+    symbols left out: SMuFL's private-use characters, every character of a
+    music font (vector.FONT_GLYPHS), and control characters."""
     words = []
     for block in pg.get_text("rawdict")["blocks"]:
         for line in block.get("lines", []):
             for span in line["spans"]:
+                if vector.font_family(span["font"]) in vector.FONT_GLYPHS:
+                    continue
                 chars: list[dict] = []
                 for ch in span["chars"] + [{"c": " "}]:
-                    if ch["c"].isspace() or 0xE000 <= ord(ch["c"]) <= 0xF8FF:
+                    if ch["c"].isspace() or 0xE000 <= ord(ch["c"]) <= 0xF8FF or ord(ch["c"]) < 32:
                         if chars:
                             text = "".join(LIGATURES.get(c["c"], c["c"]) for c in chars)
                             words.append(Word(text, chars[0]["bbox"][0], chars[-1]["bbox"][2],
@@ -151,39 +155,181 @@ def _syllabics(words: list[Word], lines: list[tuple[float, float, float]], right
     return out
 
 
-def _plain(word: str) -> str:
-    return "".join(LIGATURES.get(c, c) for c in word).strip().lower()
+# On a vocal stave, a pit score's list of who sings a line: capitals, numbers and
+# punctuation, bracketed ("(M4)", "(M1,2,5-7,LEFOU)", "(ALL—except YELLERS)",
+# a list broken over two lines). A cue has words in lower case: "(1st time only)".
+SINGERS = re.compile(r"^\(?[+A-Z0-9,.\-—–/ ]*(?:except [A-Z ]+)?\)?$")
+TEMPO = re.compile(r"^(.*?)\s*=\s*(\d+)$")
+STAFF_TEXT_REACH = 12           # stave spaces: text farther from every stave is a page's heading or footing
+ABOVE_PULL = 0.8                # text above a stave counts as this much nearer to it than below the one above
+HEADING_SIZE = 2.0              # text this many times the page's usual size is a title, not a stave's
+BOILERPLATE = re.compile(r"©|Rights Reserved|by Permission|Copyright", re.IGNORECASE)   # a footing near a stave
 
 
-def _printed_by_bar(systems: list, words_by_page: dict, used: set[tuple]) -> dict[str, set[str]]:
-    """Per bar number of every system on a page with a text layer: the words
-    printed in it, anywhere, but those written here already (`used`, as
-    (page, x0, baseline)): lyrics, chords and names."""
-    printed: dict[str, set[str]] = {}
+def _ink_top(page, stave: int, x0: float, x1: float) -> float:
+    """The top of a stave, or of the highest stem between x0 and x1 that
+    rises out of it."""
+    lines = page.staves[stave]
+    return min([lines.top] + [stem.y0 for stem in page.stems if x0 - lines.gap <= stem.x <= x1 + lines.gap
+                              and stem.y1 > lines.top and stem.y0 < lines.bottom])
+
+
+def without_singers(text: str) -> str:
+    """A vocal stave's phrase without its bracketed singers' lists, which can
+    share a line with a cue: "(M4) (last x)" -> "(last x)"; "" if nothing else."""
+    pieces = [p.strip() for p in re.findall(r"\([^)]*\)?|[^()]+\)?", text) if p.strip()]
+    return " ".join(p for p in pieces if not (("(" in p or ")" in p) and SINGERS.match(p)))
+
+
+def _groups(words: list[Word]) -> list[list[Word]]:
+    """Words on one baseline, a space apart, as phrases; a tempo's "= 152"
+    joins the words before it across the note printed between them."""
+    groups: list[list[Word]] = []
+    for word in sorted(words, key=lambda w: (round(w.y, 1), w.x0)):
+        reach = word.size * (3.0 if word.text.startswith("=") else 0.6)
+        if groups and abs(groups[-1][-1].y - word.y) < 0.5 and word.x0 - groups[-1][-1].x1 < reach:
+            groups[-1].append(word)
+        else:
+            groups.append([word])
+    return groups
+
+
+def _staff_texts(systems: list, slots: list, words_by_page: dict, used: set[tuple], lengths: dict,
+                 other_text: list[str], vocal_parts: list[str]) -> tuple[list[tuple], int]:
+    """Every printed phrase not used as a lyric, chord symbol or name, on the
+    stave nearest it: (part, staff, bar, onset, text, placement), at the drawn
+    note nearest its left edge. Left out: numbers (bar, fret, page), singers'
+    lists, stave names in the margin, and text far from every stave (listed
+    in `other_text`). Returns the items and how many singers' lists were left out."""
+    items, singers = [], 0
+    two_staves = {s.part for s in slots if s.staff > 1}
+    pages: dict[int, list] = {}
     for system in systems:
-        words = words_by_page[system.page_number][0]
-        if not words:
-            continue
-        page = system.page
-        top, bottom = page.staves[system.staves[0]].top, page.staves[system.staves[-1]].bottom
-        bar_lines = page.bar_lines[system.staves[0]]
-        for k, number in enumerate(system.bars):
-            printed.setdefault(number, set())
-        for word in words:
-            if not top - 60 < word.y < bottom + 40 or (system.page_number, word.x0, word.y) in used:
+        pages.setdefault(system.page_number, []).append(system)
+    for page_number, page_systems in pages.items():
+        page = page_systems[0].page
+        words = [w for w in words_by_page[page_number][0] if (page_number, w.x0, w.y) not in used]
+        sizes = sorted(w.size for w in words_by_page[page_number][0])
+        usual = sizes[len(sizes) // 2] if sizes else 0
+        for group in _groups(words):
+            text = " ".join(w.text for w in group)
+            if text.isdigit():
                 continue
-            k = next((k for k, (a, b) in enumerate(zip(bar_lines, bar_lines[1:])) if a <= word.cx < b), None)
-            if k is not None and k < len(system.bars):
-                printed[system.bars[k]].add(_plain(word.text))
-    return printed
+            if BOILERPLATE.search(text) or group[0].size > usual * HEADING_SIZE:
+                other_text.append(f"page {page_number}: {text!r}")
+                continue
+            middle = group[0].y - group[0].size * 0.35
+            # An instruction is printed above the stave it is for, clear of the stems
+            # rising out of it; an expression close under its own stave. So the
+            # distance to a stave's top counts from its highest stem under the text,
+            # and text midway between two staves is the lower one's.
+            tops = {s: _ink_top(page, s, group[0].x0, group[-1].x1) for sy in page_systems for s in sy.staves}
 
+            def nearness(s: int) -> float:
+                gap = page.staves[s].gap
+                if middle < tops[s]:
+                    return (tops[s] - middle) / gap * ABOVE_PULL
+                return max(middle - page.staves[s].bottom, 0) / gap
+
+            _, system, stave = min(((nearness(s), sy, s) for sy in page_systems for s in sy.staves),
+                                   key=lambda t: t[0])
+            distance = max(page.staves[stave].top - middle, middle - page.staves[stave].bottom, 0) / \
+                page.staves[stave].gap
+            lines = page.staves[stave]
+            if distance > STAFF_TEXT_REACH:
+                other_text.append(f"page {page_number}: {text!r}")
+                continue
+            if group[-1].x1 <= lines.left or system.mapping.get(stave) is None:
+                continue                                # a stave's name in the margin
+            slot = system.mapping[stave]
+            if slots[slot].part in vocal_parts:
+                kept = without_singers(text)
+                singers += kept != text
+                if not kept:
+                    continue
+                text = kept
+            bar_lines = page.bar_lines[stave]
+            k = next((k for k, (a, b) in enumerate(zip(bar_lines, bar_lines[1:])) if a <= group[0].x0 < b), 0)
+            if k >= len(system.bars):
+                continue
+            part_name, staff, number = slots[slot].part, slots[slot].staff, system.bars[k]
+            known = lengths[part_name].get(number)
+            drawn = drawing_check.drawn_events(system, stave, k, known[1]) if known else []
+            onset = min(drawn, key=lambda e: abs(e[0] - group[0].x0))[2] if drawn else Fraction(0)
+            items.append((part_name, staff if part_name in two_staves else None, number, onset, text,
+                          "above" if middle < lines.top else "below"))
+    return items, singers
+
+
+def number_as_printed(root: ET.Element, piece: Path, pdfs: list[Path]) -> list[str]:
+    """Number the bars as the page does, where it prints a number under every
+    bar of a system (a pit score skips cut bars: 1, 2, 7). Systems that print
+    only their first bar's number keep the read's. Report lines."""
+    renumber = printed_numbers(root, piece, pdfs)
+    if not renumber:
+        return ["bar numbers: the page prints none under every bar; the read's kept"]
+    for part in root.findall("part"):
+        for measure in part.findall("measure"):
+            if measure.get("number") in renumber:
+                measure.set("number", renumber[measure.get("number")])
+    changed = sum(1 for old, new in renumber.items() if old != new)
+    return [f"bar numbers as printed: {len(renumber)} bar(s) numbered from the page, {changed} of them "
+            f"differing from the read's"]
+
+
+def printed_numbers(root: ET.Element, piece: Path, pdfs: list[Path]) -> dict[str, str]:
+    """{the read's bar number: the number printed under it}, for the systems
+    that print a number under every bar."""
+    import pymupdf
+    systems, _, _ = drawing_check.drawn_systems(root, piece, pdfs)
+    renumber: dict[str, str] = {}
+    words_by_page: dict[int, list[Word]] = {}
+    for system in systems:
+        if system.page_number not in words_by_page:
+            with pymupdf.open(system.pdf) as doc:
+                words_by_page[system.page_number] = page_words(doc[system.index])
+        page = system.page
+        lowest = page.staves[system.staves[-1]]
+        bar_lines = page.bar_lines[system.staves[-1]]
+        found: dict[int, list[str]] = {}
+        for word in words_by_page[system.page_number]:
+            if word.text.isdigit() and lowest.bottom < word.y < lowest.bottom + lowest.gap * 10:
+                k = next((k for k, (a, b) in enumerate(zip(bar_lines, bar_lines[1:])) if a <= word.cx < b), None)
+                if k is not None and k < len(system.bars):
+                    found.setdefault(k, []).append(word.text)
+        if len(found) == len(system.bars) and all(len(v) == 1 for v in found.values()):
+            renumber.update({system.bars[k]: found[k][0] for k in found})
+    return renumber
+
+
+def _staff_direction(text: str, placement: str, staff: int | None) -> ET.Element:
+    """Words above or below a stave; "Moderately fast = 152" with a metronome
+    mark and its tempo, a crotchet the beat (the text layer drops the note
+    printed before "=")."""
+    direction = ET.Element("direction", {"placement": placement})
+    tempo = TEMPO.match(text)
+    words = tempo.group(1) if tempo else text
+    if words:
+        ET.SubElement(ET.SubElement(direction, "direction-type"), "words").text = words
+    if tempo:
+        metronome = ET.SubElement(ET.SubElement(direction, "direction-type"), "metronome")
+        ET.SubElement(metronome, "beat-unit").text = "quarter"
+        ET.SubElement(metronome, "per-minute").text = tempo.group(2)
+    if staff is not None:                           # a part of more than one stave
+        ET.SubElement(direction, "staff").text = str(staff)
+    if tempo:
+        ET.SubElement(direction, "sound", {"tempo": tempo.group(2)})
+    return direction
 
 def place(root: ET.Element, piece: Path, pdfs: list[Path], assume: Fraction | None = None,
-          vocal_parts: list[str] | None = None, chords_part: str | None = None) -> list[str]:
+          vocal_parts: list[str] | None = None, chords_part: str | None = None,
+          keep_lyrics: set[tuple[str, str]] | None = None) -> list[str]:
     """Write the text layer's lyrics, chord symbols and singers' names into
-    the score. Report lines."""
+    the score. A bar in `keep_lyrics` ((part, bar number): a hand patch gave
+    its lyrics) keeps them unless the text layer places its own. Report lines."""
     import pymupdf
     vocal_parts = vocal_parts or ["Voice"]
+    keep_lyrics = keep_lyrics or set()
     systems, slots, _ = drawing_check.drawn_systems(root, piece, pdfs)
     parts = {name: part for (_, name), part in zip(score.part_names(root), root.findall("part"))}
     if not systems:
@@ -217,7 +363,8 @@ def place(root: ET.Element, piece: Path, pdfs: list[Path], assume: Fraction | No
         bar_lines = page.bar_lines[system.staves[0]]
 
         def bar_at(x: float) -> int | None:
-            return next((k for k, (a, b) in enumerate(zip(bar_lines, bar_lines[1:])) if a <= x < b), None)
+            k = next((k for k, (a, b) in enumerate(zip(bar_lines, bar_lines[1:])) if a <= x < b), None)
+            return k if k is not None and k < len(system.bars) else None
 
         events_cache: dict[tuple[int, int], list] = {}
 
@@ -237,12 +384,21 @@ def place(root: ET.Element, piece: Path, pdfs: list[Path], assume: Fraction | No
             band = sorted((w for w in words if page.staves[stave].bottom < w.y < floor), key=lambda w: w.x0)
             baselines = sorted({round(w.y * 2) / 2 for w in band})
             for verse, baseline in enumerate(baselines, start=1):
-                line_words = [w for w in band if round(w.y * 2) / 2 == baseline]
+                on_line = [w for w in band if round(w.y * 2) / 2 == baseline]
+                # Some programs print a lyric's hyphen as text: it joins the word before to the next.
+                dashed = {id(before) for before, w in zip(on_line, on_line[1:]) if not w.text.strip("-–")}
+                used.update((system.page_number, w.x0, w.y) for w in on_line if not w.text.strip("-–"))
+                line_words = [w for w in on_line if w.text.strip("-–")]
                 marks = _syllabics(line_words, lines, page.staves[stave].right)
+                marks = [("hyphen" if id(w) in dashed else hyphen, extend)
+                         for w, (hyphen, extend) in zip(line_words, marks)]
                 for word, (hyphen, extend) in zip(line_words, marks):
                     k = bar_at(word.cx)
                     drawn = [e for e in events(stave, k, part_name) if e[3]] if k is not None else []
                     if not drawn:
+                        if k is not None and (part_name, system.bars[k]) in keep_lyrics:
+                            used.add((system.page_number, word.x0, word.y))     # the patch wrote it
+                            continue
                         unplaced.append(f"{part_name} bar {system.bars[k] if k is not None else '?'}: "
                                         f"{word.text!r} (no note read under it)")
                         continue
@@ -280,13 +436,15 @@ def place(root: ET.Element, piece: Path, pdfs: list[Path], assume: Fraction | No
                 onset = min(drawn, key=lambda e: abs(e[0] - group[0].x0))[2] if drawn else Fraction(0)
                 name_items.append((part_name, system.bars[k], onset, text))
                 used.update((system.page_number, w.x0, w.y) for w in group)
-            elif not text.isdigit():                    # fret, bar and page numbers say nothing here
-                other_text.append(f"page {system.page_number}: {text!r}")
+            # Anything else above the system is left for the staff text pass.
 
     report = []
     if lyric_items:
+        written = {(part_name, number) for _, part_name, number, *_ in lyric_items}
         for part_name, bars in voiced_bars.items():
             for number in bars:
+                if (part_name, number) in keep_lyrics and (part_name, number) not in written:
+                    continue                    # a hand patch's lyrics, where the page's words found no note
                 for note in measures[part_name][number].findall("note"):
                     for lyric in note.findall("lyric"):
                         note.remove(lyric)
@@ -326,25 +484,30 @@ def place(root: ET.Element, piece: Path, pdfs: list[Path], assume: Fraction | No
             drawing_check.insert_at(measure, harmony_element(chord), onset * lengths[chords_part][number][0])
         report.append(f"text layer: {len(chord_items)} chord symbol(s) written into {chords_part}, "
                       f"the read's own dropped")
-    if lyric_items or chord_items or name_items:
-        printed = _printed_by_bar(systems, words_by_page, used)
-        dropped = kept = 0
+    staff_items, skipped = _staff_texts(systems, slots, words_by_page, used, lengths, other_text, vocal_parts)
+    if lyric_items or chord_items or name_items or staff_items:
+        covered = {number for system in systems if words_by_page[system.page_number][0] for number in system.bars}
+        dropped = 0
         for part in parts.values():
             for measure in part.findall("measure"):
-                if measure.get("number") not in printed:
+                if measure.get("number") not in covered:
                     continue
                 for direction in measure.findall("direction"):
                     kinds = {c.tag for t in direction.findall("direction-type") for c in t}
-                    if kinds != {"words"}:
-                        continue
-                    said = [_plain(w) for t in direction.iter("words") for w in (t.text or "").split()]
-                    if said and all(w in printed[measure.get("number")] for w in said):
-                        kept += 1                       # printed there: "cresc.", "rit."
-                    else:
+                    if kinds == {"words"}:
                         measure.remove(direction)
                         dropped += 1
-        report.append(f"text layer: {dropped} word direction(s) the read made that the page does not print "
-                      f"dropped (chord boxes, names read as text), {kept} it does print kept")
+        report.append(f"text layer: {dropped} word direction(s) the read made dropped (chord boxes and names "
+                      "read as text, words misread); every printed word is written from the text layer")
+    for part_name, staff, number, onset, text, placement in staff_items:
+        measure = measures[part_name].get(number)
+        if measure is None or number not in lengths[part_name]:
+            continue
+        drawing_check.insert_at(measure, _staff_direction(text, placement, staff),
+                                onset * lengths[part_name][number][0])
+    if staff_items:
+        report.append(f"text layer: {len(staff_items)} text(s) written on the stave they are printed by "
+                      f"(instruments, sounds, cues, expressions); {skipped} singers' lists left out")
     for part_name, number, onset, text in name_items:
         direction = ET.Element("direction", {"placement": "above"})
         ET.SubElement(ET.SubElement(direction, "direction-type"), "words").text = text

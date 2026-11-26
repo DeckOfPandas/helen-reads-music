@@ -22,13 +22,14 @@ MINIM_XS = [155.0, 195.0]
 HEAD = 3.5
 
 
-def engrave(tmp_path: Path) -> tuple[Path, Path]:
+def engrave(tmp_path: Path, hyphen_as_text: bool = False, extras: bool = False) -> tuple[Path, Path]:
     """One system: a voice stave over a grand stave, two bars, with words.
 
     Voice  | C5 C5 C5 C5 crotchets | C5 C5 minims |
            lyrics "Kil-ler a whale." | "here___" (an extender over both minims)
-    above  "MAN 1:", chords C (beat 1), G7/B (beat 3) | N.C. (beat 1); "Tempo" (not a chord)
-    Piano  B4 whole notes over C3 whole notes.
+    above  "MAN 1:", "(M4)", chords C (beat 1), G7/B (beat 3) | N.C. (beat 1), "Brisk = 120"
+    Piano  B4 whole notes over C3 whole notes, "cresc." under the right hand;
+           bar numbers 1 and 7 printed under the system.
     """
     e = Engraver()
     voice = e.stave(100.0, BARS)
@@ -47,15 +48,26 @@ def engrave(tmp_path: Path) -> tuple[Path, Path]:
     baseline = voice.bottom + 10.0
     rights = [e.text(x + HEAD / 2, baseline, syllable, centre=True)
               for x, syllable in zip(VOICE_XS, ("Kil", "ler", "a", "whale."))]
-    e.line(rights[0] + 1.0, rights[0] + 4.0, baseline - 2.4)                       # Kil-ler
+    if hyphen_as_text:
+        e.text((VOICE_XS[0] + VOICE_XS[1]) / 2 + HEAD / 2, baseline, "-", centre=True)   # Kil - ler, as Finale prints it
+    else:
+        e.line(rights[0] + 1.0, rights[0] + 4.0, baseline - 2.4)                   # Kil-ler
     here_right = e.text(MINIM_XS[0] + HEAD / 2, baseline, "here", centre=True)
     e.line(here_right + 0.5, MINIM_XS[1] + 8.0, baseline + 0.5)                   # here___
     e.text(VOICE_XS[0], voice.top - 8.0, "C")
     e.text(VOICE_XS[2], voice.top - 8.0, "G7/B")
     e.text(MINIM_XS[0], voice.top - 8.0, "N.C.")
     e.text(VOICE_XS[0], voice.top - 18.0, "MAN 1:")
-    e.text(180.0, voice.top - 18.0, "Tempo")
+    e.text(110.0, voice.top - 18.0, "(M4)")                                       # who sings: left out
+    e.text(180.0, voice.top - 18.0, "Brisk = 120")
+    e.text(20.0, voice.bottom - 2.0, "VOICE")                                     # the stave's name, in the margin
     e.text(160.0, right.bottom + 12.0, "cresc.")                                  # between the piano staves
+    e.text(95.0, left.bottom + 12.0, "1", centre=True)                             # printed bar numbers, a cut
+    e.text(185.0, left.bottom + 12.0, "7", centre=True)
+    if extras:
+        e.text(120.0, voice.top - 6.0, "Big Title", size=24.0, centre=True)        # the piece's title
+        midway = (right.bottom + left.top) / 2 + 8.0 * 0.35
+        e.text(150.0, midway, "(LOW TOM)")                                          # between the piano staves
     piece = tmp_path / "piece"
     piece.mkdir()
     pdf = e.save(piece / "song.pdf")
@@ -115,6 +127,43 @@ def test_lyrics_go_on_the_notes_they_are_printed_under_with_their_hyphens(placed
     assert any(line.startswith("text layer: 5 lyric syllable(s) written") for line in report)
 
 
+def test_a_hyphen_printed_as_text_joins_the_syllables_and_is_no_syllable(tmp_path):
+    piece, pdf = engrave(tmp_path, hyphen_as_text=True)
+    root = read_score()
+    textlayer.place(root, piece, [pdf])
+    lyrics = [[(l.findtext("syllabic"), l.findtext("text")) for l in n.findall("lyric")]
+              for n in bar_of(root, "P1", "1").findall("note")]
+    assert lyrics == [[("begin", "Kil")], [("end", "ler")], [("single", "a")], [("single", "whale.")]]
+
+
+def test_a_hand_patchs_lyrics_stay_where_the_page_words_find_no_note(tmp_path, monkeypatch):
+    piece, pdf = engrave(tmp_path)
+    root = read_score()
+    minim = bar_of(root, "P1", "2").find("note")
+    lyric = ET.SubElement(minim, "lyric")
+    ET.SubElement(lyric, "text").text = "here"                      # from a patch: "C5:2@here"
+    original = textlayer.drawing_check.drawn_events
+
+    def no_notes_in_bar_2(system, stave, k, length):
+        return [] if system.bars[k] == "2" else original(system, stave, k, length)
+
+    monkeypatch.setattr(textlayer.drawing_check, "drawn_events", no_notes_in_bar_2)
+    textlayer.place(root, piece, [pdf], keep_lyrics={("Voice", "2")})
+    assert minim.findtext("lyric/text") == "here"
+    assert "here" not in [w.text for w in bar_of(root, "P1", "2").iter("words")]      # not staff text too
+    assert bar_of(root, "P1", "1").find("note/lyric/text").text == "Kil"
+
+
+def test_a_title_is_no_staff_text_and_a_label_midway_goes_to_the_stave_below(tmp_path):
+    piece, pdf = engrave(tmp_path, extras=True)
+    root = read_score()
+    report = textlayer.place(root, piece, [pdf])
+    assert "Big Title" not in [w.text for w in root.iter("words")]
+    assert any("Big Title" in line for line in report)
+    tom = next(d for d in root.iter("direction") if d.findtext("direction-type/words") == "(LOW TOM)")
+    assert tom.findtext("staff") == "2"
+
+
 def test_chord_symbols_go_at_their_beat_and_replace_the_read_ones(placed):
     root, _ = placed
     bar1 = bar_of(root, "P1", "1")
@@ -129,14 +178,29 @@ def test_chord_symbols_go_at_their_beat_and_replace_the_read_ones(placed):
     assert bar_of(root, "P2", "1").find("harmony") is None                   # the misread F7 is gone
 
 
-def test_a_singers_name_is_written_above_the_voice_and_other_text_reported(placed):
+def test_a_singers_name_is_written_above_the_voice_and_every_other_printed_word_on_its_stave(placed):
     root, report = placed
-    # The read's "X 00" and its own "MAN 1:" go; the page's name is written once.
+    # The read's "X 00", "MAN 1:" and "cresc." go; the page's words are written once each.
     assert [w.text for w in bar_of(root, "P1", "1").iter("words")] == ["MAN 1:"]
-    assert [w.text for w in bar_of(root, "P2", "2").iter("words")] == ["cresc."]       # printed there: kept
     assert bar_of(root, "P1", "1").find("direction/direction-type/dynamics/f") is not None   # drawn, kept
     assert "text layer: 1 singer name(s): MAN 1: (bar 1)" in report
-    assert any("'Tempo'" in line for line in report)
+    cresc = next(d for d in bar_of(root, "P2", "2").findall("direction") if d.find(".//words") is not None)
+    assert (cresc.findtext(".//words"), cresc.get("placement"), cresc.findtext("staff")) == ("cresc.", "below", "1")
+    tempo = next(d for d in bar_of(root, "P1", "2").findall("direction") if d.find(".//metronome") is not None)
+    assert tempo.findtext(".//words") == "Brisk" and tempo.findtext(".//per-minute") == "120"
+    assert tempo.find("sound").get("tempo") == "120"
+    every = [w.text for w in root.iter("words")]
+    assert "(M4)" not in every and "VOICE" not in every                # who sings; the margin's name
+    assert any("1 singers' lists left out" in line for line in report)
+
+
+def test_bars_are_numbered_as_printed_under_the_system(tmp_path):
+    piece, pdf = engrave(tmp_path)
+    root = read_score()
+    assert textlayer.number_as_printed(root, piece, [pdf]) == [
+        "bar numbers as printed: 2 bar(s) numbered from the page, 1 of them differing from the read's"]
+    for part in root.findall("part"):
+        assert [m.get("number") for m in part.findall("measure")] == ["1", "7"]
 
 
 @pytest.mark.parametrize("text, kind, alter, bass, degrees", [
@@ -153,6 +217,21 @@ def test_a_singers_name_is_written_above_the_voice_and_other_text_reported(place
 def test_chord_symbols_parse(text, kind, alter, bass, degrees):
     chord = textlayer.parse_chord(text)
     assert (chord["kind"], chord["alter"], chord["bass"], chord["degrees"]) == (kind, alter, bass, degrees)
+
+
+@pytest.mark.parametrize("text, singers", [
+    ("(M4)", True), ("(M1,2,5-7,9,LEFOU)", True), ("(ALL—except YELLERS)", True), ("(+LEFOU)", True),
+    ("(F1-4,7,9,11,12/", True), ("M2,5-7,9)", True), ("(GASTON)", True),
+    ("(1st time only)", False), ("(last x)", False), ("(sustain through vamp)", False)])
+def test_a_singers_list_is_told_from_a_cue(text, singers):
+    assert bool(textlayer.SINGERS.match(text)) is singers
+
+
+@pytest.mark.parametrize("text, kept", [
+    ("(M4) (last x)", "(last x)"), ("(M3,M12) (GASTON)", ""), ("(M1,2,5", ""), (",9,LEFOU)", ""),
+    ("(1st time only)", "(1st time only)"), ("FAST STRINGS", "FAST STRINGS"), ("(w/Violin)", "(w/Violin)")])
+def test_singers_lists_come_out_of_a_line_they_share_with_a_cue(text, kept):
+    assert textlayer.without_singers(text) == kept
 
 
 @pytest.mark.parametrize("text", ["GASTON", "MAN", "Moderately", "Hm7", "C7zz"])

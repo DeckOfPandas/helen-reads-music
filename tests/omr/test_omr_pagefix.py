@@ -51,6 +51,21 @@ def test_a_bar_holding_two_is_split_and_a_crossing_note_tied():
     assert score.bad_bars(root.find("part")) == []
 
 
+def test_an_empty_strip_is_taken_out_only_of_the_parts_that_have_it():
+    # The flute has an empty bar 3 (a 2/4 time signature's strip before a repeat); the horn has none.
+    strip = '<measure number="3"><attributes><time><beats>2</beats><beat-type>4</beat-type></time></attributes></measure>'
+    flute = part("P1", [bar(four_crotchets(), 1, attributes()), bar(four_crotchets(), 2), strip,
+                        bar([("C4", 1), ("D4", 1)], 4)])
+    horn = part("P2", [bar(four_crotchets("G3"), 1, attributes()), bar(four_crotchets("G3"), 2),
+                       bar([("G3", 1), ("A3", 1)], 3)])
+    root = score.ET.fromstring(make_score([("P1", "Flute", flute), ("P2", "Horn", horn)]))
+    assert pagefix.fix_page(root, 3) == ["Flute: empty bar 3 taken out"]
+    flute_bars, horn_bars = (p.findall("measure") for p in root.findall("part"))
+    assert [m.get("number") for m in flute_bars] == ["1", "2", "3"] and len(horn_bars) == 3
+    assert flute_bars[2].findtext("attributes/time/beats") == "2"      # the time moves to the next bar
+    assert _sounding(root) == 4 + 4 + 2 + 4 + 4 + 2
+
+
 def test_a_bar_with_nothing_sounding_is_dropped():
     root = score.ET.fromstring(make_score([("P1", "Flute", part("P1", [
         bar(four_crotchets(), 1, attributes()), bar(four_crotchets(), 2), bar([("r", 1)], 3)]))]))

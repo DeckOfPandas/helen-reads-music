@@ -147,22 +147,27 @@ PRINTED_BARS = "printed-bars.json"
 
 def printed_bars(piece: Path) -> dict[int, int] | None:
     """{page: bars printed on it} from library/<piece>/printed-bars.json,
-    {"<page>": [first bar, last bar], ...}; keys starting "_" are notes."""
+    {"<page>": [first bar, last bar], ...}, or {"<page>": bars} where the
+    printed numbers skip (cuts: 1, 2, 7); keys starting "_" are notes."""
     path = piece / PRINTED_BARS
     if not path.is_file():
         return None
     table = json.loads(path.read_text(encoding="utf-8"))
-    return {int(page): span[1] - span[0] + 1 for page, span in table.items() if not page.startswith("_")}
+    return {int(page): span if isinstance(span, int) else span[1] - span[0] + 1
+            for page, span in table.items() if not page.startswith("_")}
 
 
 def first_printed_bar(piece: Path) -> int | None:
-    """The first page's first printed bar number, from printed-bars.json."""
+    """The first page's first printed bar number, from printed-bars.json
+    (1 where pages give counts: their numbers come from the page itself)."""
     path = piece / PRINTED_BARS
     if not path.is_file():
         return None
     table = json.loads(path.read_text(encoding="utf-8"))
     pages = sorted((int(page), span) for page, span in table.items() if not page.startswith("_"))
-    return pages[0][1][0] if pages else None
+    if not pages:
+        return None
+    return 1 if isinstance(pages[0][1], int) else pages[0][1][0]
 
 
 def first_read(pdf: Path, out: Path, name: str, run) -> tuple[book.Book, int, list[str]]:
@@ -298,6 +303,13 @@ def process(piece: Path, force: bool = False, run=None,
         ok, merge_report = merge.merge_file(mxl, merged, config)
         if ok:
             root = score.load(merged)
+            by_bar = ("patches", "transpose_changes")
+            if any(table.get(key) for key in by_bar) and table.get("printed_numbers", True) and drawn(piece):
+                import textlayer
+                import vector
+                repair.drop_phantom_bars(root)              # so the drawn bars line up with the read's
+                printed = textlayer.printed_numbers(root, piece, vector.piece_pdfs(piece))
+                table = {**table, **{key: by_read_number(table[key], printed) for key in by_bar if table.get(key)}}
             try:
                 merge_report += ["", "repairs:", *repair.repair(root, table)]
             except ValueError as err:
@@ -326,6 +338,16 @@ def process(piece: Path, force: bool = False, run=None,
                     merge_report += ["", *text_pass(root, piece, table, assume_time)]
                 except ValueError as err:
                     return False, notes + [f"merge.json: {err}"]
+            for spec in table.get("split") or []:
+                try:
+                    signs = None
+                    if drawn(piece):
+                        import drawing_check
+                        import vector
+                        signs = drawing_check.drawn_clef_signs(root, piece, vector.piece_pdfs(piece), spec.get("part"))
+                    merge_report += ["", *repair.split_by_clef(root, spec, signs)]
+                except ValueError as err:
+                    return False, notes + [f"merge.json: {err}"]
             if drawn(piece):
                 padded = repair.pad_short_voices(root, assume_time)
                 merge_report += ["", f"voices finished with an invisible rest: {len(padded)}",
@@ -343,6 +365,16 @@ def process(piece: Path, force: bool = False, run=None,
             except ValueError as err:
                 return False, notes + [f"merge.json: {err}"]
             merge_report += repair.fix_labels_and_sounds(root, labels)
+            if table.get("printed_numbers", True) and drawn(piece):
+                import textlayer
+                import vector
+                merge_report += ["", *textlayer.number_as_printed(root, piece, vector.piece_pdfs(piece))]
+            if table.get("last_bar"):
+                try:
+                    lost = repair.keep_through(root, str(table["last_bar"]))
+                except ValueError as err:
+                    return False, notes + [f"merge.json: {err}"]
+                merge_report.append(f"ended at bar {table['last_bar']}: {lost} bar(s) after it left out")
             score.save(root, merged, like=merged)
             score.save(root, merged.with_suffix(".musicxml"))
             check = score.check(merged, assume_time)
@@ -399,6 +431,16 @@ def drawn(piece: Path) -> bool:
     return bool(vector.load_catalogue(piece)) or vector.has_smufl(pdfs)
 
 
+def by_read_number(per_part: dict, printed: dict[str, str]) -> dict:
+    """merge.json's patches and transpose_changes ({part: {bar: ...}}) name
+    bars as printed; the score is numbered as read until number_as_printed
+    runs, after them. Each bar printed under a number goes to the read's
+    number for it; a bar the page leaves unnumbered keeps its key."""
+    read = {number: old for old, number in printed.items()}
+    return {part: bars if part.startswith("_") else {read.get(bar, bar): value for bar, value in bars.items()}
+            for part, bars in per_part.items()}
+
+
 def text_pass(root: score.ET.Element, piece: Path, table: dict, assume_time) -> list[str]:
     """Lyrics, chord symbols and singers' names from the PDFs' text layer
     (textlayer.py), where the PDFs keep their words as text. Report lines."""
@@ -411,8 +453,10 @@ def text_pass(root: score.ET.Element, piece: Path, table: dict, assume_time) -> 
     except ImportError:
         return ["text layer: PyMuPDF is not installed; skipped"]
     import textlayer
+    keep = {(part, bar) for part, bars in (table.get("patches") or {}).items() if not part.startswith("_")
+            for bar, patch in bars.items() if not bar.startswith("_") and "@" in json.dumps(patch)}
     return textlayer.place(root, piece, pdfs, assume_time, table.get("vocal_parts", ["Voice"]),
-                           table.get("chords_part"))
+                           table.get("chords_part"), keep)
 
 
 def second_opinion(primary: score.ET.Element, second: Path, table: dict, assume_time) -> list[str]:

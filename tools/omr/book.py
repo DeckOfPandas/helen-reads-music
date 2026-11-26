@@ -221,6 +221,17 @@ def read_page_checked(pdf: Path, page: int, folder: Path, dpi: int | None, run, 
         if read.refused_dpi or not read.mxls:
             continue
         got = bar_count(read.mxls)
+        if got > want and len(read.mxls) == 1:
+            # A bar Audiveris made of nothing (a time signature's strip): taken out, no new read needed.
+            import pagefix
+            root = score.load(read.mxls[0])
+            trimmed = pagefix.trim_empty(root, want)
+            if trimmed and all(len(p.findall("measure")) == want for p in root.findall("part")):
+                fixed = folder / f"at-{each or 'drawn'}" / "trimmed.mxl"
+                score.save(root, fixed)
+                read = Result([fixed], read.lost, read.logs)
+                got = want
+                _progress(top, f"page {page}: {'; '.join(trimmed)}")
         tries.append((abs(got - want), each, got, read))
         if got == want:
             break

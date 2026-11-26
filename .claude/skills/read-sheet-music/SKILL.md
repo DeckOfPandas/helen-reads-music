@@ -185,10 +185,14 @@ For each bar still wrong, decide where the fix belongs:
 Things the tools cannot do yet:
 - read tuplets or grace notes from the drawing;
 - read text a PDF draws as shapes, so there lyrics are only what Audiveris
-  read (a PDF that keeps its words as text has them read, `textlayer.py`);
-- place text other than lyrics, chord symbols and singers' names (tempo,
-  "sub.", "rit.") from the text layer;
-- read fingered tremolos from a scan.
+  read (a PDF that keeps its words as text has them read, `textlayer.py`,
+  staff text too);
+- read fingered tremolos from a scan;
+- tell a full-size grace note from an ordinary one (Finale prints some
+  full size): such a bar doesn't add up and needs a patch (`:g16`, `:g32`).
+
+Patches and `transpose_changes` name bars as printed, even in a cut score
+numbered 1, 2, 7.
 
 Say which of these you met.
 
@@ -211,6 +215,12 @@ Follow the end-of-work list in `CLAUDE.md`, and add:
 
 ## Traps already met
 
+- **A pit score's bars go out of line page by page.** Read in chunks,
+  Audiveris makes a bar of the strip a time signature sits in, in some
+  parts only, and every bar after it is one out. For a drawing with one
+  system a page, write `printed-bars.json` as each page's bar count
+  (`{"12": 4}`), counted from the drawing's bar lines on every stave (they
+  must agree): each page is then read alone, and checked.
 - **Write scores with `score.save`, nothing else.** Audiveris labels its
   files `version="4.0.3"`, its library's version, not MusicXML's, and
   Sibelius then warns that the file is "an old version of MusicXML".

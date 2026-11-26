@@ -318,12 +318,119 @@ def smufl_glyphs(page) -> list[Glyph]:
     return glyphs
 
 
+# Older music fonts put the symbols on ordinary keys (Finale's Maestro and
+# Engraver Font Set, after Adobe's Sonata): the font and the key name the
+# symbol. A pair of names is one character drawing two marks.
+FONT_GLYPHS: dict[str, dict[int, str | tuple[str, ...]]] = {
+    "EngraverFontSet": {
+        0x0153: "notehead-black", 0x02D9: "notehead-half", 0x0077: "notehead-whole", 0x00BF: "notehead-x",
+        0x004F: "notehead-half",                                           # a diamond (harmonic) on a stem
+        0x0152: "rest-quarter", 0x2030: "rest-eighth", 0x2248: "rest-16th", 0x00D3: "rest-whole",
+        0x2211: "rest-whole",
+        0x004A: "flag-8th-down", 0x006A: "flag-8th-up", 0x0072: "flag-16th-up", 0x0052: "flag-16th-down",
+        0x0062: "flat", 0x0023: "sharp", 0x006E: "natural", 0x004E: "natural",   # N: a natural in brackets
+        0x0026: "clef-treble", 0x003F: "clef-bass", 0x002F: "clef-percussion",
+        0x003E: "accent", 0x005E: "marcato", 0x0076: "marcato", 0x002D: "tenuto", 0x002E: "dot",
+        0x02D8: ("accent", "dot-small"), 0xFB02: ("accent", "dot-small"),
+        0x0066: "dynamic", 0x0070: "dynamic", 0x00DF: "dynamic",
+    },
+    "Maestro": {
+        0x002E: "dot", 0x2265: "down-bow", 0x2264: "up-bow",
+        0x0066: "dynamic", 0x0046: "dynamic", 0x0070: "dynamic", 0x0050: "dynamic", 0x0192: "dynamic",
+        0x00E7: "dynamic", 0x00DF: "dynamic", 0x03C0: "dynamic",
+    },
+    "EngraverFontExtras": {0x006F: "open"},
+}
+# Their dynamics, as MusicXML spells them.
+FONT_DYNAMICS = {
+    ("Maestro", 0x0066): "f", ("Maestro", 0x0046): "mf", ("Maestro", 0x0070): "p", ("Maestro", 0x0050): "mp",
+    ("Maestro", 0x0192): "ff", ("Maestro", 0x00E7): "sffz", ("Maestro", 0x00DF): "sfz", ("Maestro", 0x03C0): "pp",
+    ("EngraverFontSet", 0x0066): "f", ("EngraverFontSet", 0x0070): "p", ("EngraverFontSet", 0x00DF): "sfz",
+}
+_INK: dict[tuple[str, str], dict[int, tuple[float, float, float, float] | None]] = {}
+
+
+def font_family(name: str) -> str:
+    """A font's name without its subset tag ("ADJCLL+Maestro" -> "Maestro")."""
+    return name.split("+", 1)[-1]
+
+
+def font_key_name(key: str) -> str | tuple[str, ...]:
+    """The built-in name of a "font:<family>:<hex>" glyph key, "other" if none."""
+    _, family, code = key.split(":")
+    return FONT_GLYPHS.get(family, {}).get(int(code, 16), "other")
+
+
+def _font_ink(doc, family: str) -> dict[int, tuple[float, float, float, float] | None]:
+    """Each character's ink box in the PDF's embedded `family` font, from its
+    origin in font-size units, y down: drawn alone, measured, kept per file.
+    A character's text box is the whole font's height, far taller than a
+    notehead, so it cannot place one on the stave."""
+    import pymupdf
+    from PIL import Image
+    cache = _INK.setdefault((doc.name, family), {})
+    if "_buffer" not in cache:
+        cache["_buffer"] = None
+
+        def plain(name: str) -> str:                # "Nimbus Sans Regular" is "NimbusSans-Regular"
+            return "".join(c for c in name if c.isalnum()).lower()
+        for page in doc:
+            for xref, _, _, basefont, _, _ in page.get_fonts():
+                if plain(font_family(basefont)) == plain(family):
+                    cache["_buffer"] = doc.extract_font(xref)[3]
+                    break
+            if cache["_buffer"]:
+                break
+
+    def measure(code: int):
+        if code not in cache:
+            cache[code] = None
+            if cache["_buffer"]:
+                scratch = pymupdf.open()
+                page = scratch.new_page(width=400, height=400)
+                page.insert_font(fontname="m", fontbuffer=cache["_buffer"])
+                page.insert_text((150, 250), chr(code), fontname="m", fontsize=100)
+                pix = page.get_pixmap(dpi=144)
+                image = Image.frombytes("RGB", (pix.width, pix.height), pix.samples).convert("L")
+                box = image.point(lambda v: 255 - v).getbbox()
+                if box:
+                    cache[code] = tuple(round(v, 4) for v in ((box[0] / 2 - 150) / 100, (box[1] / 2 - 250) / 100,
+                                                              (box[2] / 2 - 150) / 100, (box[3] / 2 - 250) / 100))
+        return cache[code]
+    cache["_measure"] = measure
+    return cache
+
+
+def font_glyphs(page) -> list[Glyph]:
+    """Every character of a music font in FONT_GLYPHS on the page, as a
+    glyph keyed "font:<family>:<hex>" with its ink box; a character drawing
+    two marks is two glyphs on the one box."""
+    glyphs = []
+    for span in page.get_texttrace():
+        family = font_family(span.get("font", ""))
+        if family not in FONT_GLYPHS:
+            continue
+        measure = _font_ink(page.parent, family)["_measure"]
+        for code, _, origin, _ in span["chars"]:
+            ink = measure(code)
+            if ink is None:
+                continue
+            x0, y0 = origin[0] + ink[0] * span["size"], origin[1] + ink[1] * span["size"]
+            x1, y1 = origin[0] + ink[2] * span["size"], origin[1] + ink[3] * span["size"]
+            key = f"font:{family}:{code:04X}"
+            names = font_key_name(key)
+            for name in names if isinstance(names, tuple) else (names,):
+                glyphs.append(Glyph(key, x0, y0, x1, y1, name))
+    return glyphs
+
+
 def has_smufl(pdfs: list[Path]) -> bool:
-    """Whether any page draws music as SMuFL characters, which name themselves."""
+    """Whether any page draws music as characters that name themselves:
+    SMuFL's, or a music font's in FONT_GLYPHS."""
     import pymupdf
     for pdf in pdfs:
         with pymupdf.open(pdf) as doc:
-            if any(smufl_glyphs(page) for page in doc):
+            if any(smufl_glyphs(page) or font_glyphs(page) for page in doc):
                 return True
     return False
 
@@ -360,7 +467,7 @@ def _vertical_ends(page, touching: Counter, total: Counter) -> None:
     # One path can hold a page's beams as rectangles or quads: each counts.
     shapes += [item[1].rect if item[0] == "qu" else item[1] for d in drawings if d.get("fill") is not None
                for item in d["items"] if item[0] in ("re", "qu")]
-    shapes += [pymupdf.Rect(g.x0, g.y0, g.x1, g.y1) for g in smufl_glyphs(page)]
+    shapes += [pymupdf.Rect(g.x0, g.y0, g.x1, g.y1) for g in smufl_glyphs(page) + font_glyphs(page)]
     for r in shapes:
         sides[int(r.x0)].append((r.x0, r))
         sides[int(r.x1)].append((r.x1, r))
@@ -398,6 +505,26 @@ def stem_width(doc) -> float:
     return width
 
 
+def _lined_up(bar_lines: list[list[float]]) -> list[list[float]]:
+    """Each stave's bar lines without the strokes no stave of its system
+    shares: a chord's stem across the whole stave, or a divisi bracket,
+    crosses a stave as a bar line does. A neighbouring stave is of the same
+    system when its own inner bar lines are all on this one; a stave with no
+    such neighbour (a system of one stave) keeps every line."""
+    def same(x: float, lines: list[float]) -> bool:
+        return any(abs(x - y) < 0.6 for y in lines)
+    out = []
+    for index, lines in enumerate(bar_lines):
+        near = [other for j in (index - 1, index + 1) if 0 <= j < len(bar_lines)
+                for other in [bar_lines[j]] if other[1:-1] and all(same(x, lines) for x in other[1:-1])]
+        if not near:
+            out.append(lines)
+            continue
+        out.append([x for k, x in enumerate(lines)
+                    if k in (0, len(lines) - 1) or any(same(x, other) for other in near)])
+    return out
+
+
 def read_page(page, lines: int = 5) -> Page:
     """Everything this module finds on one pymupdf page; `lines`, the lines
     a stave has (6 for guitar tab)."""
@@ -432,14 +559,19 @@ def read_page(page, lines: int = 5) -> Page:
                     if y0 <= stave.top + 0.5 and y1 >= stave.bottom - 0.5 and stave.left - 1 <= x <= stave.right + 1)
         merged: list[float] = []
         for x in xs:
-            if not merged or x - merged[-1] > stave.gap * 1.4:      # a double bar line counts once
+            # A double bar line counts once, and so does one with a time signature
+            # between it and a repeat sign: no bar is under three spaces wide.
+            if not merged or x - merged[-1] > stave.gap * 3.0:
                 merged.append(x)
             else:
                 merged[-1] = x                                    # keep the right-hand line
         if merged and merged[0] - stave.left > stave.gap * 2:
             merged.insert(0, stave.left)                          # the system's opening line, if not drawn here
+        if len(merged) > 2 and merged[1] - merged[0] < stave.gap * 10:
+            merged.pop(0)           # only the clef and key before a repeat sign: the first bar starts there
         bar_lines.append(merged)
-    glyphs = smufl_glyphs(page)
+    bar_lines = _lined_up(bar_lines)
+    glyphs = smufl_glyphs(page) + font_glyphs(page)
     split = merges_glyphs(filled)
     for d in filled:
         for key, r in filled_shapes(d, split):
@@ -484,11 +616,26 @@ def load_catalogue(piece: Path) -> dict[str, str]:
 
 
 def name_glyphs(page: Page, catalogue: dict[str, str]) -> None:
-    """Names from the catalogue; a SMuFL character not in it keeps its own."""
+    """Names from the catalogue; a SMuFL or music-font character not in it
+    keeps its own. A music font's one dot is an augmentation dot beside a
+    head, a staccato above or below one."""
     for glyph in page.glyphs:
-        own = smufl_name(int(glyph.key[6:], 16)) if glyph.key.startswith("smufl:") else "other"
+        own = glyph.name if glyph.key.startswith(("smufl:", "font:")) else "other"
         glyph.name = catalogue.get(glyph.key, own)
     _place_by_ledgers(page)
+    heads = [g for g in page.glyphs if g.name.startswith("notehead")]
+    for glyph in page.glyphs:
+        if glyph.name != "dot" or not glyph.key.startswith("font:") or glyph.stave is None:
+            continue
+        gap = page.staves[glyph.stave].gap
+        beside = any(-gap * 0.3 < glyph.x0 - head.x1 < gap * 2.0 and abs(glyph.cy - head.cy) < gap * 0.6
+                     for head in heads)
+        paired = any(other is not glyph and other.key == glyph.key and abs(other.cx - glyph.cx) < gap * 0.3
+                     and gap * 0.8 < abs(other.cy - glyph.cy) < gap * 1.2 for other in page.glyphs)
+        if paired and any(abs(glyph.cx - x) < gap * 2.5 for x in page.bar_lines[glyph.stave]):
+            glyph.name = "other"                    # a repeat sign's dots, beside its double bar line
+        elif not beside:
+            glyph.name = "dot-small"
 
 
 def _ledger_ladder(stave: Stave, y: float, ledgers: list[float]) -> bool:
@@ -600,6 +747,10 @@ def write_draft(piece: Path, clusters: dict, minimum: int = 3) -> Path:
             continue
         if key.startswith("smufl:"):                # the font names it: a draft "other" gives way
             name = existing.get(key) if existing.get(key) not in (None, "other") else smufl_name(int(key[6:], 16))
+        elif key.startswith("font:"):
+            name = existing.get(key) if existing.get(key) not in (None, "other") else font_key_name(key)
+            if isinstance(name, tuple):
+                continue                            # two marks in one character: named in FONT_GLYPHS only
         else:
             name = existing.get(key) or guess_name(entry["width"], entry["height"], entry["kinds"], entry["gap"])
         glyphs[key] = {"name": name, "count": entry["count"], "size": [entry["width"], entry["height"]],
