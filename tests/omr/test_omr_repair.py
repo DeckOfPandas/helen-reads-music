@@ -410,6 +410,91 @@ def test_padding_a_voice_that_starts_mid_bar_leaves_the_next_voice_in_place():
     assert [n.findtext("duration") for n in measure.findall("note") if n.findtext("voice") == "2"] == ["4", "4"]
 
 
+def test_a_percussion_stave_is_split_into_a_part_per_clef():
+    # Bar 1 a drum hit (percussion clef); bars 2-3 timpani (a bass clef from bar 2).
+    first = ("<attributes><divisions>4</divisions><time><beats>4</beats><beat-type>4</beat-type></time>"
+             "<clef><sign>percussion</sign></clef></attributes>")
+    drum = ("<note><unpitched><display-step>C</display-step><display-octave>5</display-octave></unpitched>"
+            "<duration>16</duration><voice>1</voice></note>")
+    timp = "<note><pitch><step>D</step><octave>3</octave></pitch><duration>16</duration><voice>1</voice></note>"
+    bars = (f'<measure number="1">{first}{drum}</measure>'
+            f'<measure number="2"><attributes><clef><sign>F</sign><line>4</line></clef></attributes>{timp}</measure>'
+            f'<measure number="3">{timp}<barline location="right"><bar-style>light-heavy</bar-style></barline>'
+            "</measure>")
+    root = build([("P9", "Percussion", f'<part id="P9">{bars}</part>')])
+    spec = {"part": "Percussion", "by_clef": {"percussion": "Drums", "F": "Timpani"}}
+    assert repair.split_by_clef(root, spec) == ["Percussion split by clef: Drums 1 bar(s), Timpani 2 bar(s)"]
+    assert [n for _, n in score.part_names(root)] == ["Drums", "Timpani"]
+    drums, timpani = root.findall("part")
+    assert [m.find("note/unpitched") is not None for m in drums.findall("measure")] == [True, False, False]
+    assert [m.find("note/pitch") is not None for m in timpani.findall("measure")] == [False, True, True]
+    assert {c.findtext("sign") for c in drums.iter("clef")} == {"percussion"}
+    assert timpani.find("measure/attributes/clef/sign").text == "F"
+    assert drums.findall("measure")[2].find("barline/bar-style").text == "light-heavy"   # kept in both
+    assert score.bad_bars(drums) == [] and score.bad_bars(timpani) == []
+
+
+def test_the_clefs_drawn_decide_the_split_and_a_drum_bar_read_pitched_becomes_drum_notes():
+    # Audiveris read no percussion clef: every bar pitched, under a treble clef.
+    first = ("<attributes><divisions>4</divisions><time><beats>4</beats><beat-type>4</beat-type></time>"
+             "<clef><sign>G</sign><line>2</line></clef></attributes>")
+    note = "<note><pitch><step>C</step><octave>5</octave></pitch><duration>16</duration><voice>1</voice></note>"
+    bars = f'<measure number="1">{first}{note}</measure><measure number="2">{note}</measure>'
+    root = build([("P9", "Percussion", f'<part id="P9">{bars}</part>')])
+    spec = {"part": "Percussion", "by_clef": {"percussion": "Drums", "F": "Timpani"}}
+    repair.split_by_clef(root, spec, {"1": "percussion", "2": "F"})
+    drums, timpani = root.findall("part")
+    hit = drums.find("measure/note")
+    assert hit.find("pitch") is None and hit.findtext("unpitched/display-step") == "C"
+    assert timpani.findall("measure")[1].find("note/pitch") is not None
+
+
+def test_a_doubling_changes_transposition_and_keeps_its_drawn_keys():
+    # Reed 3: clarinet in Bb (written two sharps), flute from bar 2 (no key), clarinet from bar 3.
+    first = untimed(fifths=2)
+    bars = [rest_bar(1, 16, first), rest_bar(2, 16, "<attributes><key><fifths>0</fifths></key></attributes>"),
+            rest_bar(3, 16, "<attributes><key><fifths>2</fifths></key></attributes>")]
+    root = build([("P1", "Reed 3", part("P1", bars)),
+                  ("P2", "Piano", part("P2", [rest_bar(n, 16, untimed(fifths=0) if n == 1 else "") for n in (1, 2, 3)]))])
+    report = repair.repair(root, {"transpose": {"Reed 3": "Bb"}, "transpose_changes": {"Reed 3": {"2": "C", "3": "Bb"}}})
+    assert "Reed 3: 2 change(s) of transposition (bar 2 C, bar 3 Bb)" in report
+    measures = root.find("part").findall("measure")
+    assert [m.findtext("attributes/transpose/chromatic") for m in measures] == ["-2", "0", "-2"]
+    assert [m.findtext("attributes/key/fifths") for m in measures] == ["2", "0", "2"]     # as drawn, unmoved
+
+
+def test_a_bar_with_nothing_in_any_part_is_taken_out_and_its_time_moves_on():
+    # Bar 3 holds only a 2/4 and a double bar line: the strip before a repeat sign.
+    strip = ('<measure number="3"><attributes><time><beats>2</beats><beat-type>4</beat-type></time></attributes>'
+             '<barline location="right"><bar-style>heavy-light</bar-style></barline></measure>')
+    bars = [rest_bar(1, 16, untimed()), rest_bar(2, 16), strip, rest_bar(4, 8)]
+    root = build([("P1", "Oboe", part("P1", bars)), ("P2", "Horn", part("P2", bars))])
+    assert repair.drop_phantom_bars(root) == ["3"]
+    for p in root.findall("part"):
+        measures = p.findall("measure")
+        assert [m.get("number") for m in measures] == ["1", "2", "4"]
+        assert measures[2].findtext("attributes/time/beats") == "2"
+        assert measures[2].find("barline").get("location") == "left"
+
+
+def test_a_repeat_read_in_one_part_is_given_to_every_part():
+    repeat = '<barline location="right"><bar-style>light-heavy</bar-style><repeat direction="backward"/></barline>'
+    oboe = part("P1", [rest_bar(1, 16, untimed()).replace("</measure>", repeat + "</measure>")])
+    horn = part("P2", [rest_bar(1, 16, untimed())])
+    root = build([("P1", "Oboe", oboe), ("P2", "Horn", horn)])
+    assert repair.share_barlines(root) == 1
+    assert root.findall("part")[1].find("measure/barline/repeat").get("direction") == "backward"
+
+
+def test_a_score_ends_at_the_bar_asked_for():
+    bars = [rest_bar(n, 16, untimed() if n == 1 else "") for n in (1, 2, 7, 8)]
+    root = build([("P1", "Oboe", part("P1", bars)), ("P2", "Horn", part("P2", bars))])
+    assert repair.keep_through(root, "7") == 1
+    assert [[m.get("number") for m in p.findall("measure")] for p in root.findall("part")] == [["1", "2", "7"]] * 2
+    with pytest.raises(ValueError, match="no bar 9"):
+        repair.keep_through(root, "9")
+
+
 def test_a_bar_no_voice_fills_is_left_for_the_check():
     bar = f'<measure number="1">{_timed(4, divisions="<divisions>4</divisions>")}{_two_voices(8, upper=3)}</measure>'
     root = build([("P1", "Piano", f'<part id="P1">{bar}</part>')])
@@ -808,6 +893,61 @@ def test_a_patch_inserts_a_grace_note_that_takes_no_time():
     assert grace.find("grace").get("slash") == "yes" and grace.findtext("type") == "eighth"
     assert [c.tag for c in grace][:2] == ["grace", "pitch"]
     assert notes[3].findtext("pitch/step") == "D"
+    assert score.bad_bars(root.find("part")) == []
+
+
+def test_a_patch_inserts_unslashed_grace_notes_of_the_printed_value():
+    # A trumpet's run of four demisemiquavers printed full size before the third beat, as graces.
+    root = build([_timed_part("P1", "Trumpet", [("E4", 2), ("F4", 1), ("A4", 1), ("A4", 2)])])
+    repair.apply_patches(root, {"Trumpet": {"1": "2 - - +F#4:g32 +G4:g32 +G#4:g32 +A4:g32 2"}})
+    notes = root.find("part/measure").findall("note")
+    graces = notes[1:5]
+    assert [g.find("grace").attrib for g in graces] == [{}] * 4
+    assert [g.findtext("type") for g in graces] == ["32nd"] * 4
+    assert [g.findtext("pitch/step") + (g.findtext("pitch/alter") or "") for g in graces] == ["F1", "G", "G1", "A"]
+    assert score.bad_bars(root.find("part")) == []
+
+
+def test_a_patch_edit_replaces_the_gap_before_a_voice_with_the_rest_it_gives():
+    # Voice 2 starts on beat 3, after a forward; the patch gives it a minim rest there instead.
+    root = build([_timed_part("P1", "Piano", [("C5", 4)])])
+    measure = root.find("part/measure")
+    divisions = int(measure.findtext("attributes/divisions"))
+    for xml in ("<backup><duration>4</duration></backup>",
+                "<forward><duration>2</duration><voice>2</voice></forward>",
+                "<note><pitch><step>E</step><octave>4</octave></pitch><duration>2</duration><voice>2</voice>"
+                "<type>half</type></note>"):
+        element = ET.fromstring(xml)
+        element.find("duration").text = str(int(element.findtext("duration")) * divisions)
+        measure.append(element)
+    repair.apply_patches(root, {"Piano": {"1": {"voice": "2", "edit": "+s:2 2"}}})
+    assert measure.find("forward") is None
+    assert measure.find("note[rest]").get("print-object") == "no"
+    assert [d for _, d, _, _ in _durations(measure, "2")] == [str(2 * divisions)] * 2
+    assert score.bad_bars(root.find("part")) == []
+
+
+def test_a_patch_can_replace_the_bar_then_add_a_second_voice():
+    root = build([_timed_part("P1", "Voice", [("C5", 2), ("C5", 2)])])
+    repair.apply_patches(root, {"Voice": {"1": [{"notes": "xB4:1@beast r:1 r:1 xE5:1/2 xE5:1/2"},
+                                                {"voice": "2", "notes": "r:3 F4:1/2 F4:1/2"}]}})
+    measure = root.find("part/measure")
+    assert [n.findtext("voice") for n in measure.findall("note")] == ["1"] * 5 + ["2"] * 3
+    assert measure.findtext("note/lyric/text") == "beast"
+    assert score.bad_bars(root.find("part")) == []
+
+
+def test_a_patch_with_triplets_rescales_the_divisions():
+    # Oboe: two quaver triplets read as six quavers, then a quaver and a crotchet rest; the
+    # divisions (2 to the crotchet) can't hold a third.
+    events = [("F4", 0.5), ("A4", 0.5), ("B4", 0.5), ("D5", 0.5), ("F5", 0.5), ("A5", 0.5), ("B5", 0.5), ("r", 1)]
+    root = build([_timed_part("P1", "Oboe", events)])
+    repair.apply_patches(root, {"Oboe": {"1": "1/3 1/3 1/3 1/3 1/3 1/3 1/2 +r:1/2 1"}})
+    notes = root.find("part/measure").findall("note")
+    divisions = int(root.find("part/measure/attributes/divisions").text)
+    assert divisions % 3 == 0
+    assert [n.findtext("time-modification/actual-notes") for n in notes[:6]] == ["3"] * 6
+    assert {int(n.findtext("duration")) for n in notes[:6]} == {divisions // 3}
     assert score.bad_bars(root.find("part")) == []
 
 

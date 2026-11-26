@@ -36,7 +36,8 @@ HEADS = {"notehead-black": "black", "notehead-half": "half", "notehead-whole": "
          "notehead-x": "x", "notehead-slash": "slash"}
 RESTS = {"rest-quarter": Fraction(1), "rest-eighth": Fraction(1, 2), "rest-16th": Fraction(1, 4)}
 FLAGS = {"flag-8th-up": 1, "flag-8th-down": 1, "flag-16th-up": 2, "flag-16th-down": 2}
-MARKS = {"accent": "accent", "marcato": "strong", "tenuto": "tenuto", "dot-small": "staccato", "open": "open"}
+MARKS = {"accent": "accent", "marcato": "strong", "tenuto": "tenuto", "dot-small": "staccato", "open": "open",
+         "up-bow": "up-bow", "down-bow": "down-bow"}
 ACCIDENTALS = {"flat": -1, "sharp": 1, "natural": 0}
 BEAM_THICKEST = 8.0                 # points: half a space even on a stave drawn twice the usual size
 FLAT_BULB = 0.7                    # a flat's note is this many spaces above the flat's foot
@@ -182,8 +183,11 @@ def beams_on_page(pg) -> list[Beam]:
             elif runs[-1]:
                 runs.append([])
         quads = [run[start:start + 4] for run in runs for start in range(0, len(run) - 3, 4)]
+        quads += [run for run in runs if len(run) == 3]        # closed by the fill: the fourth side implied
         for quad in quads:
             points = [quad[0][1]] + [item[2] for item in quad]
+            if len(quad) == 3:
+                points.append(quad[0][1])
             verticals = [(p, q) for p, q in zip(points, points[1:]) if abs(p.x - q.x) < 0.05 and abs(p.y - q.y) > 0.2]
             if len(verticals) != 2:
                 continue
@@ -297,12 +301,13 @@ def read_bar(page: vector.Page, beams: list[Beam], stave_index: int, bar: int,
 
     # A mark above a high note can sit nearer the stave above, and be placed
     # there: marks are looked for across the page, and each goes to the
-    # nearest head, on whichever stave.
+    # nearest head, on whichever stave. A mark kept above the stave over a
+    # low note can be five spaces from it.
     marks = [g for g in page.glyphs if g.name in MARKS and left <= g.cx <= right]
     others = [g for g in page.glyphs if g.name in HEADS and g.stave != stave_index]
     for event in events:
         for glyph in marks:
-            if abs(glyph.cx - event.x) < gap * 1.2 and any(abs(glyph.cy - h.y) < gap * 3.2 for h in event.heads):
+            if abs(glyph.cx - event.x) < gap * 1.2 and any(abs(glyph.cy - h.y) < gap * 5.0 for h in event.heads):
                 mine = min(abs(glyph.cy - h.y) for h in event.heads)
                 if any(abs(o.cx - glyph.cx) < gap * 1.2 and abs(o.cy - glyph.cy) < mine for o in others):
                     continue
@@ -407,23 +412,30 @@ def _find_ties(heads: list[Head], elsewhere: list[Head], curves: list[Curve], ga
 
 
 def _find_tremolos(events: list[Event], beams: list[Beam], gap: float, expected: Fraction) -> list[Event] | None:
-    """A fingered tremolo: two neighbouring minims (or whole notes), each
-    written at the full value but together lasting it, with tremolo strokes
-    (shaped like beams, which such notes never have) drawn near them. Halve
-    every such pair; return the events if the bar then adds up."""
+    """A fingered tremolo: two neighbouring minims, whole notes or (strokes
+    between their stems) crotchets, each written at the full value but
+    together lasting it, with tremolo strokes (shaped like beams, which such
+    notes never have) drawn near them. Halve every such pair, marking it
+    "tremolo-start:<strokes>" and "tremolo-stop:<strokes>"; return the events
+    if the bar then adds up."""
     changed = False
     out = [Event(e.x, e.length, e.heads, e.stem, set(e.marks), e.whole_bar) for e in events]
     i = 0
     while i + 1 < len(out):
         a, b = out[i], out[i + 1]
         kinds = {h.kind for h in a.heads + b.heads}
-        if a.heads and b.heads and kinds <= {"half", "whole"} and a.length == b.length and \
-                any(beam.x1 >= a.x - gap * 2 and beam.x0 <= b.x + gap for beam in beams
-                    if beam.y_left > min(h.y for h in a.heads + b.heads) - gap * 6
-                    and beam.y_left < max(h.y for h in a.heads + b.heads) + gap * 6):
+        open_heads = kinds <= {"half", "whole"}
+        crotchets = kinds == {"black"} and a.length == b.length == 1
+        strokes = []
+        if a.heads and b.heads and a.length == b.length and (open_heads or crotchets):
+            low, high = min(h.y for h in a.heads + b.heads), max(h.y for h in a.heads + b.heads)
+            reach = (a.x - gap * 2, b.x + gap) if open_heads else (a.x - gap, b.x + gap)
+            strokes = [beam for beam in beams if beam.x1 >= reach[0] and beam.x0 <= reach[1]
+                       and low - gap * 6 < beam.y_left < high + gap * 6]
+        if strokes:
             a.length, b.length = a.length / 2, b.length / 2
-            a.marks.add("tremolo-start")
-            b.marks.add("tremolo-stop")
+            a.marks.add(f"tremolo-start:{min(len(strokes), 4)}")
+            b.marks.add(f"tremolo-stop:{min(len(strokes), 4)}")
             changed = True
             i += 2
         else:
@@ -536,16 +548,26 @@ def drawn_clef(page: vector.Page, stave_index: int) -> tuple | None:
     return found
 
 
-def spell(voices: dict[str, list[Event]], clef: tuple, fifths: int) -> None:
+def clef_at(page: vector.Page, stave_index: int, x: float) -> tuple | None:
+    """The clef in force at x on a stave: the last clef drawn left of it
+    (a clef changed mid-system, or at the end of a bar for the next); the
+    system's opening clef, with its 8, where none is drawn after it."""
+    first = drawn_clef(page, stave_index)
+    clefs = sorted((g for g in page.glyphs if g.stave == stave_index and g.name in CLEF_GLYPHS), key=lambda g: g.x0)
+    before = [g for g in clefs[1:] if g.x1 < x]
+    return CLEF_GLYPHS[before[-1].name] if before else first
+
+
+def spell(voices: dict[str, list[Event]], clef: tuple, fifths: int, clef_for=None) -> None:
     """Give every head its pitch (step letter, alteration, octave), from its
-    stave position, the clef, the key and the bar's accidentals: a drawn
-    accidental holds for later notes on the same line or space until the
-    bar line."""
+    stave position, the clef (or `clef_for(x)`, the clef in force at a
+    head), the key and the bar's accidentals: a drawn accidental holds for
+    later notes on the same line or space until the bar line."""
     import repair
     carried: dict[tuple[str, int], int] = {}
     heads = sorted((h for events in voices.values() for e in events for h in e.heads), key=lambda h: h.x)
     for head in heads:
-        letter, octave = pitch_at(head.step, clef)
+        letter, octave = pitch_at(head.step, (clef_for(head.x) if clef_for else None) or clef)
         if head.accidental is not None:
             carried[(letter, octave)] = head.accidental
         head.pitch = (letter, carried.get((letter, octave), repair.key_alter(fifths, letter)), octave)

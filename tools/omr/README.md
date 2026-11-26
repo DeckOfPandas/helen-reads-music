@@ -49,6 +49,15 @@ into one. Each page's outcome is in `omr/chunks/<read>/progress.txt`. The
 bars are numbered from the first page's first printed bar: Audiveris calls a
 short first bar a pickup, bar 0, and puts every bar after one out.
 
+Where the printed numbers skip (a cut score numbered 1, 2, 7), give each
+page's bar count instead, `{"12": 4}`; on a drawing, count the bars drawn on
+each stave and check every stave agrees. The bars are then numbered from the
+digits under the bottom stave (`textlayer.number_as_printed`). Before any
+other DPI is tried, a read with too many bars loses each bar holding nothing
+at all, not even a rest (`pagefix.trim_empty`): Audiveris makes one of the
+strip where a time signature sits between a double bar line and a repeat,
+in some parts only.
+
 ## Reading the PDF's own drawing
 
 A PDF exported from notation software is a drawing, not pixels: every
@@ -73,8 +82,11 @@ reading adds up and differs from the score, it wins:
   one on the next stave;
 - rests missing from an otherwise right bar are put back;
 - ties are set as drawn (across a system break too, a chord's ties each);
-- a fingered tremolo (two minims a beam's strokes apart, together lasting
-  one) is written as one;
+- a fingered tremolo (two minims, or two crotchets, a beam's strokes apart,
+  together lasting one of them) is written as one, with its number of strokes;
+- a slur that starts and stops in one bar but that no drawn curve joins is
+  taken out (Audiveris reads tremolo strokes and crossing curves as slurs),
+  and so is a second slur between the same notes; the report lists the bars;
 - a drum bar is written from the drawing, voices as drawn, a voice the page
   leaves without rests padded with invisible ones where its gaps are;
 - an octave clef's small 8 is drawn on every system and a read can miss it
@@ -83,8 +95,10 @@ reading adds up and differs from the score, it wins:
 - where the drawing names its dynamics (SMuFL's name themselves; elsewhere
   name them `dynamic` in `glyphs.json`), a dynamic the score has in a bar
   that draws none is dropped (Audiveris reads chord-box dots and fret
-  numbers as p and f), and a SMuFL dynamic drawn where its part has none is
-  written in.
+  numbers as p and f); a dynamic drawn as a character (SMuFL's, or a music
+  font's) is written where its part has none, and replaces the read ones
+  where they differ (Audiveris reads sffz as ff). Letters side by side
+  that spell a dynamic are one: f and p are fp, f and mp are two.
 
 A bar whose drawing does not add up (tuplets, grace notes) is reported, not
 changed. Nor is a drum bar holding grace notes (flams): the drawing reads
@@ -106,6 +120,20 @@ music font (Leland, Bravura) rather than as shapes. Their codepoints name
 them, so they need no naming in `glyphs.json`, and `survey` shows only the
 shapes left. A drum kit written as one voice, stems either way, is read as
 one voice when splitting it by stem direction doesn't add up.
+
+Finale writes its symbols as characters of its own fonts (EngraverFontSet,
+Maestro, EngraverFontExtras), each subset into the PDF. `vector.FONT_GLYPHS`
+names their characters, and each one's ink box is measured by drawing it
+alone in its embedded font, so these too need no naming. A dot is named by
+where it sits: beside a head an augmentation dot, above or below one a
+staccato, paired up and down by a bar line a repeat sign's. Finale draws a
+beam, and a tremolo stroke, as three lines whose fill closes the fourth side.
+
+A bar line crosses every stave of its system at one x. A stroke as tall as
+a stave that its neighbours of the same system lack (a chord's stem across
+the whole stave, a divisi bracket) is no bar line; on a system of one stave
+nothing is compared. A strip under ten spaces at a system's start, holding
+only the clef and key before a repeat sign, is no bar.
 
 A score printed from a web browser (Skia in the PDF's producer) outlines a
 whole page's symbols in a few filled paths. On such a page, where a path
@@ -136,18 +164,34 @@ words from the text layer instead, placed against the drawing:
 
 - lyrics: words between a vocal part's stave (`"vocal_parts"`) and the
   stave below, one verse per baseline, each on the note whose drawn head it
-  is centred under; a drawn hyphen joins syllables, a drawn line under one
-  is an extender;
+  is centred under; a hyphen, drawn or printed as text (Finale), joins
+  syllables, a drawn line under one is an extender; a bar whose lyrics a hand
+  patch gave (`@text`) keeps them where the page's words find no drawn note;
 - chord symbols: a group of words above the system that all read as chords
   (`F♯7sus4`, `Bm/F♯`, `N.C.`), each at the drawn note its left edge sits
   over, in the score's top part (`"chords_part"` to choose another);
 - singers' names: other words above the system ending ":", written above
-  the vocal part.
+  the vocal part;
+- every other phrase (an instrument change, a synth patch, a percussion
+  label, a cue, "sub.", a tempo with its metronome mark) as staff text on the
+  stave it belongs to, at the drawn note nearest its left edge. That stave is
+  the nearest, counting from the top of the highest stem rising out of a
+  stave below, and text midway between two staves is the lower one's: an
+  instruction is printed above the stave it is for. Left out: numbers, the
+  stave names in the margin, a pit score's bracketed singers' lists on a
+  vocal stave ("(M4,F4,9)", even beside a cue: "(M4) (last x)" keeps
+  "(last x)"), copyright lines, text twice the page's usual size (the
+  title) and text farther than 12 spaces from every stave (page headings),
+  all listed in the report.
 
-Where it writes lyrics or chords, Audiveris's are dropped, and so is every
-direction of words alone that the page does not print in that bar ("cresc."
-printed there is kept). Other text above the systems (title, tempo) is
-listed in the report, not written.
+Where it writes lyrics, chords or staff text, Audiveris's words are dropped:
+every direction of words alone is written from the text layer instead.
+
+Where every bar of a system has its number printed under the bottom stave,
+the bars are numbered as printed (`textlayer.number_as_printed`), so a cut
+score keeps its numbers: 1, 2, 7. `merge.json`'s `patches` and
+`transpose_changes` name bars as printed; `process.py` finds each one's bar
+in the read before they run.
 
 ## Guitar tablature
 
@@ -233,7 +277,8 @@ call:
 | `"transpose": {"Clarinet in Bb": "Bb"}` | Marks transposing instruments (Bb, A, F, Eb, 8va, 8vb) and gives them their written key |
 | `"octave_clefs": false` | The score has no octave clefs: undoes treble clefs Audiveris read as "8 below" |
 | `"key_changes": {"125": 0}` | A key change Audiveris read but failed to export: writes it into the parts that lack it and respells the notes the old key altered |
-| `"patches": {"Oboe": {"121": "1/2 1/2 +r:1/2 ..."}}` | Hand corrections to single bars, for what no tool reads (a tuplet, a grace note, a word Audiveris missed), applied last: edit the existing notes (lengths, re-pitch, insert, delete) so lyrics and marks survive, or replace a voice; a list of patches for a bar patches several voices; fingered tremolos as `F4+Bb4/D5:2`; see `repair.py --help` |
+| `"transpose_changes": {"Reed 3": {"8": "C", "14": "Bb"}}` | A player who changes instrument (clarinet to flute, flute to piccolo `8va`): from each bar, that transposition (`C` for none). Bars as printed |
+| `"patches": {"Oboe": {"121": "1/2 1/2 +r:1/2 ..."}}` | Hand corrections to single bars, for what no tool reads (a tuplet, a grace note, a word Audiveris missed), applied last: edit the existing notes (lengths, re-pitch, insert, delete) so lyrics and marks survive, or replace a voice; a list of patches for a bar patches several voices (a voice the bar lacks is added); triplets as `1/3` (the divisions are rescaled); grace notes as `:g` (slashed) or `:g16`, `:g32` (unslashed, printed as that value); `s:2` a rest the page leaves undrawn; fingered tremolos as `F4+Bb4/D5:2`. Bars as printed. See `repair.py --help` |
 | `"vocal_parts": ["Voice"]` | Parts whose lyrics are lyrics; elsewhere dynamics, accents and instructions Audiveris read as lyrics become marks again (the default is just "Voice") |
 | `"drum_key": {"F5 x": 51}` | Extra drum sounds by stave position and notehead, as General MIDI numbers (named as General MIDI names them); every drum note gets its instrument, hands stems up, feet stems down |
 | `"drum_grooves": {...}` | Writes whole kit bars (hi-hats, slashes, triplets, flams, rolls, a second hands voice) into the bars whose kick and snare match, or into listed bars, with the bars' words and dynamics (`"marks"`); see `repair.py --help` |
@@ -246,6 +291,9 @@ call:
 | `"text_layer": false` | Turns off writing lyrics, chord symbols and names from the PDF's text layer |
 | `"chords_part": "Piano"` | The part chord symbols from the text layer go in (default: the score's top part) |
 | `"doublings": false` | Turns off filling bars from the parts that double them |
+| `"split": [{"part": "Percussion", "by_clef": {"percussion": "Drums", "F": "Timpani"}}]` | One stave a player reads several instruments from: each bar goes to the part its drawn clef names, the others rest; a percussion clef's part is unpitched |
+| `"printed_numbers": false` | Turns off numbering the bars from the digits printed under each system |
+| `"last_bar": "119"` | Ends the score at this printed bar |
 
 Always, with no key: a time change any part has is written into the parts
 that missed it (Audiveris reads time signatures stave by stave), and their

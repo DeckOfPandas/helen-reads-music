@@ -269,6 +269,136 @@ def test_dynamics_where_the_drawing_has_none_are_dropped(tmp_path):
     assert marks[:2] == [["f"], []]
 
 
+def test_a_music_font_character_is_a_glyph_with_its_own_ink_box(tmp_path, monkeypatch):
+    # MuPDF's built-in sans stands in for a music font: its "o" a notehead,
+    # its "x" one character drawing an accent and a staccato.
+    monkeypatch.setitem(vector.FONT_GLYPHS, "NimbusSans-Regular",
+                        {ord("o"): "notehead-black", ord("x"): ("accent", "dot-small")})
+    e = Engraver()
+    stave = e.stave(100.0, [50.0, 130.0])
+    e.page.insert_font(fontname="mus", fontbuffer=pymupdf.Font("helv").buffer)
+    e.page.insert_text((70.0, stave.y(4)), "o", fontname="mus", fontsize=12)
+    e.page.insert_text((90.0, stave.y(12)), "x", fontname="mus", fontsize=12)
+    pdf = e.save(tmp_path / "font.pdf")
+    with pymupdf.open(pdf) as doc:
+        drawn = vector.read_page(doc[0])
+    head = next(g for g in drawn.glyphs if g.name == "notehead-black")
+    # The ink of an "o" sits on the baseline and is about half the size tall,
+    # where the text box would run the font's whole height above and below.
+    assert abs(head.y1 - stave.y(4)) < 0.6 and 4.0 < head.height < 7.5
+    assert sorted(g.name for g in drawn.glyphs if g.key.endswith(":0078")) == ["accent", "dot-small"]
+
+
+def test_a_music_font_dot_is_a_duration_beside_a_head_a_staccato_over_one_and_a_repeat_by_a_bar_line():
+    stave = vector.Stave([100.0, 103.0, 106.0, 109.0, 112.0], 50.0, 230.0)
+    dot = "font:Maestro:002E"
+    glyphs = [vector.Glyph("smufl:E0A4", 70.0, 104.5, 73.5, 107.5, "notehead-black", 0, 0),
+              vector.Glyph(dot, 74.5, 104.0, 75.5, 105.0, "dot", 0, 0),         # beside the head
+              vector.Glyph(dot, 71.3, 97.0, 72.3, 98.0, "dot", 0, 0),           # over it
+              vector.Glyph(dot, 135.5, 103.5, 136.5, 104.5, "dot", 0, 1),       # a repeat's pair, by a bar line
+              vector.Glyph(dot, 135.5, 106.5, 136.5, 107.5, "dot", 0, 1)]
+    page = vector.Page([stave], [[50.0, 140.0, 230.0]], glyphs, [])
+    vector.name_glyphs(page, {})
+    assert [g.name for g in glyphs[1:]] == ["dot", "dot-small", "other", "other"]
+
+
+def test_a_stroke_across_one_stave_only_is_no_bar_line(tmp_path):
+    # A divisi bracket (or a chord's stem across the whole stave) on the upper stave, as thick as a bar line.
+    e = Engraver()
+    upper = e.stave(100.0, [50.0, 130.0, 200.0])
+    e.stave(130.0, [50.0, 130.0, 200.0])
+    e._line(90.0, upper.top - 2.0, 90.0, upper.bottom + 2.0, e.bar_width)
+    pdf = e.save(tmp_path / "bracket.pdf")
+    with pymupdf.open(pdf) as doc:
+        drawn = vector.read_page(doc[0])
+    assert drawn.bar_lines == [[50.0, 130.0, 200.0], [50.0, 130.0, 200.0]]
+
+
+def test_systems_of_one_stave_keep_bar_lines_their_neighbours_lack():
+    lines = [[50.0, 130.0, 200.0], [50.0, 90.0, 160.0, 200.0], [50.0, 120.0, 200.0]]
+    assert vector._lined_up(lines) == lines
+
+
+def test_a_time_signature_between_a_double_bar_line_and_a_repeat_is_not_a_bar(tmp_path):
+    e = Engraver()
+    e.stave(100.0, [50.0, 130.0, 138.0, 200.0])           # 8 points: under three spaces
+    pdf = e.save(tmp_path / "bars.pdf")
+    with pymupdf.open(pdf) as doc:
+        drawn = vector.read_page(doc[0])
+    assert drawn.bar_lines[0] == [50.0, 138.0, 200.0]
+
+
+def test_a_beam_drawn_as_three_lines_closed_by_its_fill_is_a_beam(tmp_path):
+    doc = pymupdf.open()
+    page = doc.new_page()
+    shape = page.new_shape()
+    shape.draw_polyline([(100, 50), (100, 52), (112, 52.8), (112, 50.8)])  # left side, bottom, right side
+    shape.finish(color=None, fill=(0, 0, 0), closePath=False)
+    shape.commit()
+    doc.save(tmp_path / "stroke.pdf")
+    with pymupdf.open(tmp_path / "stroke.pdf") as saved:
+        beams = vector_read.beams_on_page(saved[0])
+    assert [(b.x0, b.x1, round(b.thickness, 1)) for b in beams] == [(100.0, 112.0, 2.0)]
+
+
+def test_crotchet_pairs_with_strokes_between_are_fingered_tremolos():
+    # Two pairs of crotchets, each with four tremolo strokes between, fill two beats, not four.
+    gap = 2.0
+    heads = [vector_read.Head(5, "black", x, 50.0) for x in (10.0, 20.0, 30.0, 40.0)]
+    events = [vector_read.Event(h.x, Fraction(1), [h], "up") for h in heads]
+    strokes = [vector_read.Beam(x + 2.0, x + 8.0, 44.0 + k, 42.0 + k, 0.5) for x in (10.0, 30.0) for k in range(4)]
+    found = vector_read._find_tremolos(events, strokes, gap, Fraction(2))
+    assert [e.length for e in found] == [Fraction(1, 2)] * 4
+    assert [sorted(e.marks) for e in found] == [["tremolo-start:4"], ["tremolo-stop:4"]] * 2
+    found[0].heads[0].pitch = ("C", 0, 5)
+    element = drawing_check._pitched_notes([found[0]], "1", None, 1, Fraction(2), Fraction(2))[0]
+    assert element.findtext("type") == "quarter" and element.findtext("duration") == "1"
+    assert element.find("notations/ornaments/tremolo").text == "4"
+
+
+def test_the_clef_and_key_before_a_repeat_at_a_system_start_is_not_a_bar(tmp_path):
+    from vector_maker import GAP
+    e = Engraver()
+    start = 50.0 + 8 * GAP                                 # the repeat sign, eight spaces in
+    e.stave(100.0, [50.0, start, start + 40 * GAP, start + 80 * GAP])
+    pdf = e.save(tmp_path / "strip.pdf")
+    with pymupdf.open(pdf) as doc:
+        drawn = vector.read_page(doc[0])
+    assert drawn.bar_lines[0] == [start, start + 40 * GAP, start + 80 * GAP]
+
+
+def test_articulations_and_bowings_are_set_as_drawn_on_notes_found_by_onset_and_pitch():
+    measure = ET.fromstring(
+        '<measure number="1"><attributes><divisions>1</divisions></attributes>'
+        "<note><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><voice>1</voice>"
+        "<notations><articulations><accent/><tenuto/></articulations></notations></note>"
+        "<note><pitch><step>D</step><octave>5</octave></pitch><duration>3</duration><voice>1</voice></note>"
+        "</measure>")
+    c5, d5 = vector_read.Head(5, "black", 60.0, 0.0), vector_read.Head(6, "half", 80.0, 0.0)
+    c5.pitch, d5.pitch = ("C", 0, 5), ("D", 0, 5)
+    voices = {"single": [vector_read.Event(60.0, Fraction(1), [c5], marks={"staccato", "down-bow"}),
+                         vector_read.Event(80.0, Fraction(3), [d5])]}
+    # The drawing names accents, staccatos and bowings, but no tenutos.
+    assert drawing_check._set_marks(measure, 1, 1, voices, Fraction(1), {"accent", "staccato", "down-bow"})
+    first = measure.find("note")
+    assert [c.tag for c in first.find("notations/articulations")] == ["tenuto", "staccato"]
+    assert [c.tag for c in first.find("notations/technical")] == ["down-bow"]
+    assert measure.findall("note")[1].find("notations") is None
+
+
+def test_a_mark_drawn_far_above_its_note_is_kept_though_not_read_as_the_notes():
+    marcato = ("<note><pitch><step>A</step><octave>4</octave></pitch><duration>{d}</duration><voice>1</voice>"
+               "<notations><articulations><strong-accent/></articulations></notations></note>")
+    measure = ET.fromstring(f'<measure number="1">{marcato.format(d=2)}{marcato.format(d=2)}</measure>')
+    first, second = vector_read.Head(3, "half", 60.0, 0.0), vector_read.Head(3, "half", 90.0, 0.0)
+    first.pitch = second.pitch = ("A", 0, 4)
+    voices = {"single": [vector_read.Event(60.0, Fraction(2), [first]), vector_read.Event(90.0, Fraction(2), [second])]}
+    # A marcato drawn above the stave over the first note only, too far to be read as its own.
+    drawing_check._set_marks(measure, 1, 1, voices, Fraction(1), {"strong"}, [(60.5, "strong")], 3.6)
+    assert [n.find("notations/articulations/strong-accent") is not None for n in measure.findall("note")] == [
+        True, False]
+
+
 def test_smufl_dynamics_are_read_and_letters_side_by_side_are_one():
     stave = vector.Stave([100.0, 103.0, 106.0, 109.0, 112.0], 50.0, 230.0)
     glyphs = [vector.Glyph("smufl:E521", 60.0, 116.0, 63.0, 119.0, "dynamic", 0, 0),      # m
@@ -278,6 +408,61 @@ def test_smufl_dynamics_are_read_and_letters_side_by_side_are_one():
     page = vector.Page([stave], [[50.0, 140.0, 230.0]], glyphs, [])
     system = drawing_check.DrawnSystem(1, Path("x.pdf"), 0, page, [], [], [0], ["1", "2"], {0: 0})
     assert drawing_check._drawn_dynamics(system) == {(0, 0): [(60.0, "mf")], (0, 1): [(150.0, "sfz")]}
+
+
+def test_an_f_and_a_p_side_by_side_are_fp_though_the_f_rises_higher():
+    stave = vector.Stave([100.0, 103.0, 106.0, 109.0, 112.0], 50.0, 230.0)
+    glyphs = [vector.Glyph("smufl:E522", 60.0, 114.0, 63.0, 121.0, "dynamic", 0, 0),      # f: tall
+              vector.Glyph("smufl:E520", 63.2, 116.5, 66.0, 121.0, "dynamic", 0, 0),      # p: x-height
+              vector.Glyph("smufl:E522", 150.0, 114.0, 153.0, 121.0, "dynamic", 0, 1),    # f, then
+              vector.Glyph("smufl:E52C", 154.0, 116.5, 160.0, 121.0, "dynamic", 0, 1)]    # mp: no "fmp"
+    page = vector.Page([stave], [[50.0, 140.0, 230.0]], glyphs, [])
+    system = drawing_check.DrawnSystem(1, Path("x.pdf"), 0, page, [], [], [0], ["1", "2"], {0: 0})
+    assert drawing_check._drawn_dynamics(system) == {(0, 0): [(60.0, "fp")], (0, 1): [(150.0, "f"), (154.0, "mp")]}
+
+
+def test_a_misread_dynamic_is_replaced_by_the_drawn_one_unless_the_bar_draws_an_unknown_one():
+    # Bar 1 draws sffz and Audiveris read ff; bar 2 draws an f and a shape named only "dynamic",
+    # and the read p there stays: the drawing can't say all the bar holds.
+    stave = vector.Stave([100.0, 103.0, 106.0, 109.0, 112.0], 50.0, 230.0)
+    glyphs = [vector.Glyph("smufl:E53B", 60.0, 116.0, 66.0, 119.0, "dynamic", 0, 0),
+              vector.Glyph("smufl:E522", 150.0, 116.0, 153.0, 119.0, "dynamic", 0, 1),
+              vector.Glyph("l:0,0;1,1", 170.0, 116.0, 173.0, 119.0, "dynamic", 0, 1)]
+    page = vector.Page([stave], [[50.0, 140.0, 230.0]], glyphs, [])
+    system = drawing_check.DrawnSystem(1, Path("x.pdf"), 0, page, [], [], [0], ["1", "2"], {0: 0})
+    bars = "".join(f'<measure number="{n}"><attributes><divisions>1</divisions>'
+                   "<time><beats>4</beats><beat-type>4</beat-type></time></attributes>"
+                   f"<direction><direction-type><dynamics><{mark}/></dynamics></direction-type></direction>"
+                   "<note><rest/><duration>4</duration></note></measure>" for n, mark in (("1", "ff"), ("2", "p")))
+    flute = ET.fromstring(f'<part id="P1">{bars}</part>')
+    _, written = drawing_check._match_dynamics([system], [drawing_check.Slot("Flute", 1)], {"Flute": flute}, None)
+    marks = [[c.tag for c in m.iter() if c.tag in ("ff", "sffz", "p", "f")] for m in flute.findall("measure")]
+    assert marks == [["sffz"], ["p"]]
+    assert written == ["Flute 1 sffz (read ff)"]
+
+
+def test_slurs_no_drawn_curve_joins_are_taken_out():
+    # Four crotchets B5 A5 B5 A5, slurred in pairs on the page. The read has those two slurs,
+    # one more from the first note to the third, and the first pair's slur twice.
+    gap = 2.0
+    events = []
+    for x, (step, octave) in zip((10.0, 20.0, 30.0, 40.0), [("B", 5), ("A", 5)] * 2):
+        head = vector_read.Head(0, "black", x, 50.0)
+        head.pitch = (step, 0, octave)
+        events.append(vector_read.Event(x, Fraction(1), [head], "up"))
+    curves = [vector_read.Curve((10.5, 46.0), (19.5, 46.0)), vector_read.Curve((30.5, 46.0), (39.5, 46.0))]
+    slurs = [[("start", "1"), ("start", "2"), ("start", "3")], [("stop", "1"), ("stop", "3")],
+             [("start", "1"), ("stop", "2")], [("stop", "1")]]
+    notes = "".join(
+        f"<note><pitch><step>{step}</step><octave>5</octave></pitch><duration>1</duration><voice>1</voice>"
+        "<type>quarter</type><notations>"
+        + "".join(f'<slur type="{t}" number="{n}"/>' for t, n in marks) + "</notations></note>"
+        for step, marks in zip("BABA", slurs))
+    measure = ET.fromstring(f'<measure number="1"><attributes><divisions>1</divisions></attributes>{notes}</measure>')
+    removed = drawing_check._check_slurs(measure, 1, 1, {"single": events}, Fraction(1), curves, gap)
+    assert removed == 2
+    left = [[(s.get("type"), s.get("number")) for s in n.findall("notations/slur")] for n in measure.findall("note")]
+    assert left == [[("start", "1")], [("stop", "1")], [("start", "1")], [("stop", "1")]]
 
 
 def test_dynamics_are_left_alone_where_the_drawing_names_none(checked):
@@ -885,15 +1070,28 @@ def test_lyrics_follow_their_notes_place_when_a_note_is_put_back():
     # would slide one note left; by place, each stays on its note.
     old = [sung("100", "un"), sung("140", "der"), sung("180", "the")]
     new = [sung("16"), sung("103"), sung("142"), sung("182")]
-    drawing_check._carry_lyrics(old_lyrics(old), new)
+    drawing_check._carry_to_new_notes(old_lyrics(old), new)
     assert [n.findtext("lyric/text") for n in new] == [None, "un", "der", "the"]
 
 
 def test_lyrics_carried_one_to_one_without_places():
     old = [sung(None, "un"), sung(None, "der")]
     new = [sung(None), sung(None)]
-    drawing_check._carry_lyrics(old_lyrics(old), new)
+    drawing_check._carry_to_new_notes(old_lyrics(old), new)
     assert [n.findtext("lyric/text") for n in new] == ["un", "der"]
+
+
+def test_slurs_and_glissandi_follow_their_notes_but_not_the_marks_the_drawing_writes():
+    first, second = sung("100"), sung("140")
+    notations = ET.SubElement(first, "notations")
+    ET.SubElement(notations, "slur", {"type": "start", "number": "1"})
+    ET.SubElement(notations, "glissando", {"type": "start"})
+    ET.SubElement(ET.SubElement(notations, "articulations"), "accent")     # the drawing's to set
+    ET.SubElement(ET.SubElement(second, "notations"), "slur", {"type": "stop", "number": "1"})
+    new = [sung("101"), sung("141")]
+    drawing_check._carry_to_new_notes([(n.get("default-x"), drawing_check._carried(n)) for n in (first, second)], new)
+    assert [[c.tag for c in n.find("notations")] for n in new] == [["slur", "glissando"], ["slur"]]
+    assert [s.get("type") for n in new for s in n.iter("slur")] == ["start", "stop"]
 
 
 def test_divisions_restated_in_a_bar_count_from_the_last():

@@ -266,7 +266,7 @@ def _pitched_notes(events: list[vector_read.Event], voice: str, staff: int | Non
                 repair._place(note, repair._text_element("staff", str(staff)))
             if tremolo:
                 note.find("duration").text = str(int(length * divisions))
-                written = "whole" if head is not None and head.kind == "whole" else "half"
+                written = repair._length_spelling(length * 2)[0]
                 repair._place(note, repair._text_element("type", written))
                 modification = ET.Element("time-modification")
                 ET.SubElement(modification, "actual-notes").text = "2"
@@ -287,7 +287,8 @@ def _pitched_notes(events: list[vector_read.Event], voice: str, staff: int | Non
             if head is not None and index == 0:
                 if tremolo:
                     ornaments = ET.SubElement(notations, "ornaments")
-                    ET.SubElement(ornaments, "tremolo", {"type": tremolo.split("-")[1]}).text = "3"
+                    kind, _, strokes = tremolo.partition(":")
+                    ET.SubElement(ornaments, "tremolo", {"type": kind.split("-")[1]}).text = strokes or "3"
                 marks = [m for m in ("accent", "strong", "tenuto", "staccato") if m in event.marks]
                 if marks:
                     articulations = ET.SubElement(notations, "articulations")
@@ -412,13 +413,36 @@ def _replace_staff(measure: ET.Element, staff: int, staves: int, voices: dict[st
 
 
 LYRIC_REACH = 12        # tenths: how far a lyric's old note may sit from the new note it moves to
+# What a note's notations hold that the drawing check does not write itself, carried to the new notes.
+CARRIED = {"slur", "glissando", "slide", "fermata", "arpeggiate", "non-arpeggiate", "ornaments", "dynamics",
+           "other-notation"}
 
 
-def _carry_lyrics(old: list[tuple[str | None, list[ET.Element]]], heads: list[ET.Element]) -> None:
-    """Put the old notes' lyrics on the new notes. Where every note on both
-    sides has a default-x, each old note's lyrics go to the new note nearest
-    it, within LYRIC_REACH: a note gained or lost then takes no lyric from
-    its neighbours. Otherwise only when the notes line up one to one."""
+def _carried(note: ET.Element) -> list[ET.Element]:
+    """A note's lyrics, and the notations the drawing check does not write (slurs, glissandi, fermatas...)."""
+    out = [copy.deepcopy(lyric) for lyric in note.findall("lyric")]
+    for notations in note.findall("notations"):
+        out += [copy.deepcopy(c) for c in notations if c.tag in CARRIED]
+    return out
+
+
+def _put(note: ET.Element, element: ET.Element) -> None:
+    if element.tag == "lyric":
+        repair._place(note, element)
+        return
+    notations = note.find("notations")
+    if notations is None:
+        notations = ET.Element("notations")
+        repair._place(note, notations)
+    notations.append(element)
+
+
+def _carry_to_new_notes(old: list[tuple[str | None, list[ET.Element]]], heads: list[ET.Element]) -> None:
+    """Put the old notes' lyrics, slurs and other notations (`_carried`) on
+    the new notes. Where every note on both sides has a default-x, each old
+    note's go to the new note nearest it, within LYRIC_REACH: a note gained
+    or lost then takes none from its neighbours. Otherwise only when the
+    notes line up one to one."""
     def tenths(value: str | None) -> float | None:
         try:
             return float(value)
@@ -435,32 +459,32 @@ def _carry_lyrics(old: list[tuple[str | None, list[ET.Element]]], heads: list[ET
             if near is None or distance > LYRIC_REACH:
                 continue
             taken = {l.get("number", "1") for l in near.findall("lyric")}
-            for lyric in lyrics:
-                if lyric.get("number", "1") not in taken:
-                    repair._place(near, lyric)
+            for element in lyrics:
+                if element.tag != "lyric" or element.get("number", "1") not in taken:
+                    _put(near, element)
         return
     if len(heads) == len(old):
         for note, (_, lyrics) in zip(heads, old):
-            for lyric in lyrics:
-                repair._place(note, lyric)
+            for element in lyrics:
+                _put(note, element)
 
 
 def replace_staff_notes(measure: ET.Element, staff: int, staves: int, mine: list[list[ET.Element]],
                         divisions: Fraction) -> None:
     """One staff's notes replaced by these voice streams (each from the
-    bar's start); other staves' notes kept; the old lyrics carried over
-    (`_carry_lyrics`)."""
+    bar's start); other staves' notes kept; the old lyrics, slurs and the
+    like carried over (`_carry_to_new_notes`)."""
     kept: dict[tuple[int, str], list[ET.Element]] = defaultdict(list)
     old: list[tuple[str | None, list[ET.Element]]] = []
     for note in measure.findall("note"):
         on = int(note.findtext("staff") or 1) if staves > 1 else 1
         if on == staff:
             if note.find("chord") is None and note.find("rest") is None:
-                old.append((note.get("default-x"), [copy.deepcopy(l) for l in note.findall("lyric")]))
+                old.append((note.get("default-x"), _carried(note)))
             continue
         kept[(on, note.findtext("voice") or "1")].append(copy.deepcopy(note))
     heads = [n for stream in mine for n in stream if n.find("chord") is None and n.find("rest") is None]
-    _carry_lyrics(old, heads)
+    _carry_to_new_notes(old, heads)
     streams = []
     for s in range(1, staves + 1):
         if s == staff:
@@ -764,6 +788,9 @@ def check(root: ET.Element, piece: Path, pdfs: list[Path], fix: bool = True,
     findings: list[Finding] = []
     layout = []
     counts = Counter()
+    slur_bars: list[str] = []
+    known_marks = {vector_read.MARKS[g.name] for s in systems for g in s.page.glyphs
+                   if g.name in vector_read.MARKS} & (set(ARTICULATIONS) | set(BOWINGS))
     for drawn_system in systems:
         page_number, page, beams, curves = (drawn_system.page_number, drawn_system.page,
                                             drawn_system.beams, drawn_system.curves)
@@ -869,9 +896,24 @@ def check(root: ET.Element, piece: Path, pdfs: list[Path], fix: bool = True,
                                                 "the drawing's reading does not add up (tuplets? grace notes?)"))
                     continue
                 fifths = key_now if key_now is not None else _key_in_force(part, number)
-                vector_read.spell(voices, clef, fifths)
+                vector_read.spell(voices, clef, fifths,
+                                  clef_for=lambda x, s=stave: vector_read.clef_at(page, s, x))
                 mine = _drawn_voices(voices, expected)
                 theirs = _score_voices(measure, slot.staff, staves, divisions)
+                lines = page.staves[stave]
+                left_x, right_x = page.bar_lines[stave][k], page.bar_lines[stave][k + 1]
+                column = [(g.cx, vector_read.MARKS[g.name]) for g in page.glyphs
+                          if g.name in vector_read.MARKS and left_x <= g.cx <= right_x
+                          and abs(g.cy - (lines.top + lines.bottom) / 2) < lines.gap * 9]
+                reach = lines.gap * 1.2
+                if fix and only is None and known_marks and \
+                        _set_marks(measure, slot.staff, staves, voices, divisions, known_marks, column, reach):
+                    counts["marks"] += 1
+                if fix and only is None:
+                    taken = _check_slurs(measure, slot.staff, staves, voices, divisions, curves, lines.gap)
+                    counts["slurs"] += taken
+                    if taken:
+                        slur_bars.append(f"page {page_number} bar {number} {slot.part}: {taken}")
                 if mine == theirs:
                     continue
                 what = _describe_difference(mine, theirs)
@@ -897,6 +939,12 @@ def check(root: ET.Element, piece: Path, pdfs: list[Path], fix: bool = True,
                     continue
                 _replace_staff(measure, slot.staff, staves, voices, divisions, expected,
                                (page.bar_lines[stave][k], page.staves[stave].gap))
+                if known_marks:
+                    _set_marks(measure, slot.staff, staves, voices, divisions, known_marks, column, reach)
+                taken = _check_slurs(measure, slot.staff, staves, voices, divisions, curves, lines.gap)
+                counts["slurs"] += taken
+                if taken:
+                    slur_bars.append(f"page {page_number} bar {number} {slot.part}: {taken}")
                 finding.fixed = True
                 finding.what += "; replaced by the drawing's reading"
                 counts["replaced"] += 1
@@ -906,18 +954,187 @@ def check(root: ET.Element, piece: Path, pdfs: list[Path], fix: bool = True,
               f"({counts['rests']} by putting back rests, {counts['ties']} by setting ties, {counts['replaced']} "
               f"bar(s) replaced by the drawing's reading, {counts['keys']} key signature(s)); "
               f"{counts['drum bars written']} drum bar(s) written "
-              f"from the drawing"]
+              f"from the drawing; articulations set as drawn in {counts['marks']} bar(s); "
+              f"{counts['slurs']} slur(s) no drawn curve joins taken out"]
     report += [f"  {f.describe()}" for f in findings]
+    if slur_bars:
+        report.append(f"  slurs no drawn curve joins, taken out: {'; '.join(slur_bars)}")
     if matched is not None:
         undrawn, added = matched
         report.append(f"  dynamics in bars that draw none, dropped: {len(undrawn)}"
                       + (f" ({', '.join(undrawn)})" if undrawn else ""))
-        report.append(f"  dynamics drawn that the score lacked, written: {len(added)}"
+        report.append(f"  dynamics written as drawn, where the score lacked them or read them wrong: {len(added)}"
                       + (f" ({', '.join(added)})" if added else ""))
     report += [f"  {line}" for line in notes_lines]
     report += ["", "drawn staves matched to parts (stave numbers from the top of the page, from 0):"]
     report += [f"  {line}" for line in layout]
     return findings, report
+
+
+SLUR_END_REACH = 2.5    # stave spaces from a slur's note to the drawn curve's end, across
+SLUR_HEIGHT = 7.0       # and up or down: a slur can clear the stems and beams over its notes
+
+
+def _check_slurs(measure: ET.Element, staff: int, staves: int, voices: dict[str, list[vector_read.Event]],
+                 divisions: Fraction, curves: list, gap: float) -> int:
+    """Take out each slur that starts and stops on the staff's notes within
+    the bar but that no drawn curve joins (Audiveris reads tremolo strokes and
+    crossing curves as slurs), and the second of two slurs between the same
+    notes. Each note is found in the drawing by its onset and pitches; a slur
+    with an end not found there is kept. How many slurs were taken out."""
+    drawn: dict[tuple[Fraction, tuple[int, ...]], vector_read.Event] = {}
+    for events in voices.values():
+        onset = Fraction(0)
+        for event in events:
+            if event.heads and all(getattr(h, "pitch", None) for h in event.heads):
+                drawn[(onset * divisions, tuple(sorted(vector_read.midi_of(h.pitch) for h in event.heads)))] = event
+            onset += event.length
+    elements = list(measure)
+    event_of: dict[int, vector_read.Event] = {}
+    for onset, note in onsets(measure):
+        if note.find("rest") is not None or (staves > 1 and (note.findtext("staff") or "1") != str(staff)):
+            continue
+        chord = [note]
+        for following in elements[elements.index(note) + 1:]:
+            if following.tag != "note" or following.find("chord") is None:
+                break
+            chord.append(following)
+        if any(m.find("pitch") is None for m in chord):
+            continue
+        pitches = tuple(sorted(vector_read.midi_of((m.findtext("pitch/step"), int(m.findtext("pitch/alter") or 0),
+                                                    int(m.findtext("pitch/octave")))) for m in chord))
+        if (onset, pitches) in drawn:
+            for member in chord:
+                event_of[id(member)] = drawn[(onset, pitches)]
+
+    def joined(a: vector_read.Event, b: vector_read.Event) -> bool:
+        def near(point, event):
+            return abs(point[0] - event.x) < gap * SLUR_END_REACH and \
+                min(abs(point[1] - h.y) for h in event.heads) < gap * SLUR_HEIGHT
+        return any(near(c.left, a) and near(c.right, b) for c in curves)
+
+    open_slurs: dict[str, tuple[ET.Element, ET.Element]] = {}
+    pairs = []
+    for note in measure.findall("note"):
+        for slur in note.findall("notations/slur"):
+            number = slur.get("number", "1")
+            if slur.get("type") == "start":
+                open_slurs[number] = (note, slur)
+            elif slur.get("type") == "stop" and number in open_slurs:
+                start_note, start = open_slurs.pop(number)
+                pairs.append((start_note, start, note, slur))
+    removed, seen = 0, set()
+    for start_note, start, stop_note, stop in pairs:
+        a, b = event_of.get(id(start_note)), event_of.get(id(stop_note))
+        if a is None or b is None or a is b:
+            continue
+        if (id(a), id(b)) in seen or not joined(a, b):
+            for note, slur in ((start_note, start), (stop_note, stop)):
+                notations = note.find("notations")
+                notations.remove(slur)
+                if not len(notations):
+                    note.remove(notations)
+            removed += 1
+            continue
+        seen.add((id(a), id(b)))
+    return removed
+
+
+ARTICULATIONS = {"accent": "accent", "strong": "strong-accent", "tenuto": "tenuto", "staccato": "staccato"}
+BOWINGS = {"up-bow": "up-bow", "down-bow": "down-bow"}
+
+
+def _set_marks(measure: ET.Element, staff: int, staves: int, voices: dict[str, list[vector_read.Event]],
+               divisions: Fraction, known: set[str], column: list[tuple[float, str]] | None = None,
+               reach: float = 0.0) -> bool:
+    """Give each of the staff's notes the articulations and bowings drawn on
+    it, and take away those not drawn: each drawn note is found in the score
+    by its onset and pitches. Only the kinds of mark in `known` (those the
+    drawing names somewhere) are touched. A mark is taken away only if none
+    of its kind is drawn in the note's column (`column`: (x, mark) of every
+    mark near the stave, within `reach` of the note): a mark far above a
+    low note is drawn, though too far to be read as the note's. Whether
+    anything changed."""
+    drawn: dict[tuple[Fraction, tuple[int, ...]], tuple[set[str], float]] = {}
+    for events in voices.values():
+        onset = Fraction(0)
+        for event in events:
+            if event.heads and all(getattr(h, "pitch", None) for h in event.heads):
+                key = (onset * divisions, tuple(sorted(vector_read.midi_of(h.pitch) for h in event.heads)))
+                drawn[key] = ({m for m in event.marks if m in known}, event.x)
+            onset += event.length
+    changed = False
+    elements = list(measure)
+    for onset, note in onsets(measure):
+        if note.find("rest") is not None or (staves > 1 and (note.findtext("staff") or "1") != str(staff)):
+            continue
+        chord = [note]
+        for following in elements[elements.index(note) + 1:]:
+            if following.tag != "note" or following.find("chord") is None:
+                break
+            chord.append(following)
+        pitches = []
+        for member in chord:
+            pitch = member.find("pitch")
+            if pitch is None:
+                break
+            pitches.append(vector_read.midi_of((pitch.findtext("step"), int(pitch.findtext("alter") or 0),
+                                                int(pitch.findtext("octave")))))
+        found = drawn.get((onset, tuple(sorted(pitches))))
+        if found is None:
+            continue
+        wanted, x = found
+        nearby = {mark for cx, mark in (column or []) if abs(cx - x) < reach}
+        have = set()
+        for member in chord:
+            for group, table in (("articulations", ARTICULATIONS), ("technical", BOWINGS)):
+                for container in member.findall(f"notations/{group}"):
+                    for child in list(container):
+                        mark = next((m for m, tag in table.items() if tag == child.tag), None)
+                        if mark is not None and mark in known:
+                            if member is note and (mark in wanted or mark in nearby):
+                                have.add(mark)
+                            else:
+                                container.remove(child)
+                                changed = True
+                    if not len(container):
+                        member.find("notations").remove(container)
+            notations = member.find("notations")
+            if notations is not None and not len(notations):
+                member.remove(notations)
+        for mark in sorted(wanted - have):
+            notations = note.find("notations")
+            if notations is None:
+                notations = ET.Element("notations")
+                repair._place(note, notations)
+            group = "articulations" if mark in ARTICULATIONS else "technical"
+            container = notations.find(group)
+            if container is None:
+                container = ET.SubElement(notations, group)
+            ET.SubElement(container, ARTICULATIONS.get(mark) or BOWINGS[mark])
+            changed = True
+    return changed
+
+
+def drawn_clef_signs(root: ET.Element, piece: Path, pdfs: list[Path], part_name: str) -> dict[str, str]:
+    """Per bar number of `part_name`, the clef drawn in force at its first
+    note ("G", "F", "C", "percussion"): for splitting a stave a player reads
+    several instruments from, whose clefs Audiveris may not have read."""
+    systems, slots, _ = drawn_systems(root, piece, pdfs)
+    signs: dict[str, str] = {}
+    for system in systems:
+        page = system.page
+        for stave, slot in system.mapping.items():
+            if slot is None or slots[slot].part != part_name:
+                continue
+            for k, number in enumerate(system.bars):
+                heads = [g.cx for g in page.glyphs if g.stave == stave and g.bar == k and g.name in NOTEHEADS]
+                lines = page.bar_lines[stave]
+                x = min(heads) if heads else (lines[k] + lines[k + 1]) / 2 if k + 1 < len(lines) else lines[-1]
+                clef = vector_read.clef_at(page, stave, x)
+                if clef:
+                    signs[number] = clef[0]
+    return signs
 
 
 def onsets(measure: ET.Element) -> list[tuple[Fraction, ET.Element]]:
@@ -944,7 +1161,8 @@ def insert_at(measure: ET.Element, element: ET.Element, ticks: Fraction) -> None
         if ticks:
             offset = ET.Element("offset")
             offset.text = str(int(ticks)) if ticks.denominator == 1 else str(float(ticks))
-            position = [c.tag for c in element].index("staff") if element.find("staff") is not None else len(element)
+            after = ("footnote", "level", "voice", "staff", "sound", "listening")   # what follows <offset>
+            position = next((i for i, c in enumerate(element) if c.tag in after), len(element))
             element.insert(position, offset)
     measure.insert(list(measure).index(anchor) if anchor is not None else len(measure), element)
 
@@ -995,31 +1213,51 @@ MUSICXML_DYNAMICS = {"p", "pp", "ppp", "pppp", "ppppp", "pppppp", "f", "ff", "ff
                      "pf", "sfzp"}
 
 
+def _dynamic_letters(g: vector.Glyph) -> str | None:
+    """A dynamic glyph's letters, where its character says them (SMuFL's or a
+    music font's); None for a shape named "dynamic" in glyphs.json."""
+    if g.key.startswith("smufl:"):
+        return SMUFL_DYNAMICS.get(int(g.key[6:], 16))
+    if g.key.startswith("font:"):
+        _, family, code = g.key.split(":")
+        return vector.FONT_DYNAMICS.get((family, int(code, 16)))
+    return None
+
+
 def _drawn_dynamics(system: DrawnSystem) -> dict[tuple[int, int], list[tuple[float, str]]]:
-    """Per (stave, bar) of the system: each SMuFL dynamic drawn, (x, letters),
-    neighbouring single letters joined into one."""
-    found: dict[tuple[int, int], list[tuple[float, float, float, str]]] = defaultdict(list)
+    """Per (stave, bar) of the system: each dynamic drawn as a character
+    (SMuFL's, or a music font's in vector.FONT_DYNAMICS), (x, letters),
+    neighbouring single letters joined into one ("f" "p" is fp)."""
+    found: dict[tuple[int, int], list[tuple[float, float, float, float, str]]] = defaultdict(list)
     for g in sorted(system.page.glyphs, key=lambda g: g.x0):
-        if g.name != "dynamic" or g.stave not in system.staves or not g.key.startswith("smufl:"):
+        if g.name != "dynamic" or g.stave not in system.staves:
             continue
-        letters = SMUFL_DYNAMICS.get(int(g.key[6:], 16))
+        letters = _dynamic_letters(g)
         if letters is None:
             continue
         group = found[(g.stave, g.bar)]
-        if group and abs(group[-1][2] - g.cy) < 1.0 and g.x0 - group[-1][1] < system.page.staves[g.stave].gap:
-            x0, _, cy, text = group[-1]
-            group[-1] = (x0, g.x1, cy, text + letters)
+        # Letters of one dynamic share a line: their boxes overlap in height
+        # (an f's rises above a p's), with no more than a space between, and
+        # together they spell a dynamic, or its start ("f" "mp" are two).
+        if group and min(group[-1][3], g.y1) - max(group[-1][2], g.y0) > 0.5 * min(group[-1][3] - group[-1][2],
+                                                                                 g.y1 - g.y0) \
+                and g.x0 - group[-1][1] < system.page.staves[g.stave].gap \
+                and any(known.startswith(group[-1][4] + letters) for known in MUSICXML_DYNAMICS):
+            x0, _, y0, y1, text = group[-1]
+            group[-1] = (x0, g.x1, min(y0, g.y0), max(y1, g.y1), text + letters)
         else:
-            group.append((g.x0, g.x1, g.cy, letters))
-    return {key: [(x0, text) for x0, _, _, text in group] for key, group in found.items()}
+            group.append((g.x0, g.x1, g.y0, g.y1, letters))
+    return {key: [(x0, text) for x0, _, _, _, text in group] for key, group in found.items()}
 
 
 def _match_dynamics(systems: list[DrawnSystem], slots: list[Slot], parts: dict[str, ET.Element],
                     assume: Fraction | None) -> tuple[list[str], list[str]] | None:
     """Take out each dynamic the score has in a bar of a system that draws
     none there (Audiveris reads dots and lettering, a chord box or a fret
-    number, as p, f and sfz); write each SMuFL dynamic drawn where its part
-    has none in that bar, at the drawn note nearest it. Only where the
+    number, as p, f and sfz); write each dynamic drawn as a character at the
+    drawn note nearest it, in place of the bar's read ones on that stave
+    where they differ (kept if the bar also draws one with no known
+    letters). Only where the
     drawing names its dynamics (SMuFL's, or "dynamic" in glyphs.json);
     otherwise None, nothing done. Returns (dropped, written)."""
     if not any(g.name == "dynamic" for s in systems for g in s.page.glyphs):
@@ -1038,15 +1276,28 @@ def _match_dynamics(systems: list[DrawnSystem], slots: list[Slot], parts: dict[s
                     if direction.find("direction-type/dynamics") is not None:
                         measures[number].remove(direction)
                         dropped.append(f"{name} {number}")
+        unread = {(g.stave, g.bar) for g in system.page.glyphs
+                  if g.name == "dynamic" and g.stave in system.staves and _dynamic_letters(g) is None}
         for (stave, k), marks in _drawn_dynamics(system).items():
             slot = system.mapping.get(stave)
             if slot is None or k is None or k >= len(system.bars):
                 continue
             name, number = slots[slot].part, system.bars[k]
             measure = next((m for m in parts[name].findall("measure") if m.get("number") == number), None)
-            if measure is None or measure.find("direction/direction-type/dynamics") is not None \
-                    or number not in lengths[name]:
+            if measure is None or number not in lengths[name]:
                 continue
+            # The bar's dynamics on this stave, as read: kept if they are the drawn
+            # ones, else replaced by them (Audiveris reads sffz as ff, mp as p).
+            staff = str(slots[slot].staff)
+            existing = [d for d in measure.findall("direction") if d.find("direction-type/dynamics") is not None
+                        and (d.findtext("staff") or "1") == staff]
+            have = sorted(c.text if c.tag == "other-dynamics" else c.tag
+                          for d in existing for c in d.find("direction-type/dynamics"))
+            if have == sorted(letters for _, letters in marks) or (existing and (stave, k) in unread):
+                continue                        # as drawn, or the drawing can't say all it holds
+            for direction in existing:
+                measure.remove(direction)
+            was = f" (read {'+'.join(have)})" if existing else ""
             divisions, expected = lengths[name][number]
             events = drawn_events(system, stave, k, expected)
             for x, letters in marks:
@@ -1060,7 +1311,7 @@ def _match_dynamics(systems: list[DrawnSystem], slots: list[Slot], parts: dict[s
                 if slots[slot].staff > 1:
                     ET.SubElement(direction, "staff").text = str(slots[slot].staff)
                 insert_at(measure, direction, onset * divisions)
-                written.append(f"{name} {number} {letters}")
+                written.append(f"{name} {number} {letters}{was}")
     return dropped, written
 
 

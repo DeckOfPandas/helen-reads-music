@@ -429,14 +429,55 @@ def _fold(root: ET.Element, ranges: list[range]) -> None:
     _rebuild(root, columns)
 
 
+def trim_empty(root: ET.Element, want: int) -> list[str]:
+    """In each part with more bars than `want`, take out bars with nothing in
+    them at all (not even a rest), last first, until it has `want`; their
+    attributes go to the next bar (the last bar's to the one before).
+    Audiveris makes such a bar of the strip a time signature sits in between
+    a double bar line and a repeat sign, and in some parts only. Notes say
+    what was done."""
+    notes = []
+    names = dict(score.part_names(root))
+    for part in root.findall("part"):
+        measures = part.findall("measure")
+        for index in reversed(range(len(measures))):
+            if len(part.findall("measure")) <= want:
+                break
+            measure = measures[index]
+            if measure.find("note") is not None:
+                continue
+            others = part.findall("measure")
+            position = others.index(measure)
+            if position + 1 < len(others):              # into the next bar, before its notes
+                into = others[position + 1]
+                head = [c for c in measure if c.tag in ("print", "attributes")]
+                for offset, child in enumerate(head):
+                    into.insert(offset, child)
+                barline = measure.find("barline")
+                if barline is not None and into.find("barline[@location='left']") is None:
+                    barline.set("location", "left")
+                    into.insert(len(head), barline)
+            elif position:                              # the last bar: its attributes onto the one before
+                others[position - 1].extend(measure.findall("attributes"))
+            else:
+                continue
+            part.remove(measure)
+            notes.append(f"{names.get(part.get('id'), part.get('id'))}: empty bar {index + 1} taken out")
+        for number, measure in enumerate(part.findall("measure"), start=1):
+            measure.set("number", str(number))
+    return notes
+
+
 def fix_page(root: ET.Element, want: int) -> list[str]:
     """Put the page right in place; notes say what was done. Raises
     ValueError, leaving `root` unchanged in meaning (the caller keeps its
     own copy), when it cannot."""
+    notes = trim_empty(root, want)
+    if all(len(p.findall("measure")) == want for p in root.findall("part")):
+        return notes
     usual = typical(root)
     if usual is None:
         raise ValueError("no bars with notes on the page")
-    notes = []
     ranges = systems(root)
     for index in reversed(range(len(ranges))):   # later systems first: indices before stay put
         bars = systems(root)[index]

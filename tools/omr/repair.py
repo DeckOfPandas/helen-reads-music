@@ -488,6 +488,34 @@ def write_transposition(part: ET.Element, kind: str, concert: int | None) -> int
     return moved
 
 
+def write_transpose_changes(part: ET.Element, changes: dict[str, str]) -> int:
+    """A player who changes instrument changes transposition: {"14": "C",
+    "22": "Bb"} writes, from each bar, that kind's <transpose> ("C" for
+    none). Keys are left as drawn: the drawing check sets them. Returns
+    how many changes were written."""
+    measures = {m.get("number"): m for m in part.findall("measure")}
+    written = 0
+    for number, kind in changes.items():
+        if number.startswith("_"):
+            continue
+        if number not in measures:
+            raise ValueError(f"transpose_changes: no bar {number}")
+        if kind != "C" and kind not in TRANSPOSITIONS:
+            raise ValueError(f"transpose_changes: no kind {kind!r} (C, {', '.join(TRANSPOSITIONS)})")
+        (diatonic, chromatic, octave), _ = TRANSPOSITIONS[kind] if kind != "C" else ((0, 0, 0), 0)
+        attributes = _measure_attributes(measures[number])
+        for old in attributes.findall("transpose"):
+            attributes.remove(old)
+        element = ET.Element("transpose")
+        ET.SubElement(element, "diatonic").text = str(diatonic)
+        ET.SubElement(element, "chromatic").text = str(chromatic)
+        if octave:
+            ET.SubElement(element, "octave-change").text = str(octave)
+        _insert_in_order(attributes, element)
+        written += 1
+    return written
+
+
 def _single_voice_events(measure: ET.Element, divisions: Fraction) -> list[tuple] | None:
     """[("n", crotchets, lowest pitch) | ("r", crotchets, None)] for a bar in
     one voice; chord members fold into their note. None for anything else
@@ -1591,6 +1619,9 @@ def _parse_pitched(token: str) -> tuple[list[tuple], Fraction, bool, str | None]
     return pitches, Fraction(length), tie_start, lyric
 
 
+GRACES = {"g": "1/2", "g8": "1/2", "g16": "1/4", "g32": "1/8"}     # a patch's grace lengths: the value printed
+
+
 def _build_tremolo(token: str, voice: str, staff: str | None, divisions: Fraction) -> list[ET.Element]:
     """"F4+Bb4/D5:2": a fingered tremolo, the first chord alternating with the
     second for 2 crotchets. Each is written at the full value (here a minim)
@@ -1626,13 +1657,21 @@ def _build_tremolo(token: str, voice: str, staff: str | None, divisions: Fractio
 def _build_notes(token: str, voice: str, staff: str | None, divisions: Fraction) -> list[ET.Element]:
     if "/" in token.split(":")[0]:
         return _build_tremolo(token, voice, staff, divisions)
+    if token.startswith("s:"):
+        # A rest the page does not draw: where a voice starts late or stops early.
+        rest = _build_notes("r" + token[1:], voice, staff, divisions)
+        rest[0].set("print-object", "no")
+        return rest
     heads, _, length = token.split("@")[0].rstrip("~").rpartition(":")
-    if length == "g":
-        # A grace note (an acciaccatura, slashed quaver) takes no time: it has no duration.
-        notes = _build_notes(token.replace(":g", ":1/2", 1), voice, staff, divisions)
+    if length in GRACES:
+        # A grace note takes no time: it has no duration. "g" is an acciaccatura
+        # (a slashed quaver); "g8", "g16", "g32" an unslashed one of that value.
+        notes = _build_notes(token.replace(f":{length}", ":1", 1), voice, staff, divisions)
+        written = _length_spelling(Fraction(GRACES[length]))[0]
         for note in notes:
             note.remove(note.find("duration"))
-            _place(note, ET.Element("grace", {"slash": "yes"}))
+            note.find("type").text = written
+            _place(note, ET.Element("grace", {"slash": "yes"} if length == "g" else {}))
         return notes
     pitches, length, tie_start, lyric = _parse_pitched(token)
     notes = []
@@ -1736,6 +1775,201 @@ def _shift_after(measure: ET.Element, position: int, ticks: int) -> None:
             return
 
 
+def _unpitch(part: ET.Element) -> int:
+    """Pitched notes as drum notes at the same stave positions. Returns how many."""
+    count = 0
+    for note in part.iter("note"):
+        pitch = note.find("pitch")
+        if pitch is None:
+            continue
+        unpitched = ET.Element("unpitched")
+        ET.SubElement(unpitched, "display-step").text = pitch.findtext("step")
+        ET.SubElement(unpitched, "display-octave").text = pitch.findtext("octave")
+        note.insert(list(note).index(pitch), unpitched)
+        note.remove(pitch)
+        for accidental in note.findall("accidental"):
+            note.remove(accidental)
+        count += 1
+    return count
+
+
+def split_by_clef(root: ET.Element, spec: dict, signs: dict[str, str] | None = None) -> list[str]:
+    """One stave a percussionist reads several instruments from, split into a
+    part each by the clef its bars are in: {"part": "Percussion", "by_clef":
+    {"percussion": "Drums", "F": "Timpani", "G": "Bells"}}. A notation
+    program cannot sound one part that is now a kit (unpitched) and now
+    timpani (pitched). Each bar goes to the part its clef names (from
+    `signs`, bar number to the clef drawn there, else the score's clefs),
+    the others get a whole-bar rest; each new part's clefs are its own, and
+    a percussion-clef part's notes become drum notes. A bar with no clef
+    named stays in the first part."""
+    names = {name: pid for pid, name in score.part_names(root)}
+    if spec.get("part") not in names:
+        raise ValueError(f"split names no part {spec.get('part')!r}")
+    by_clef = spec.get("by_clef") or {}
+    if not by_clef:
+        raise ValueError("split: no by_clef")
+    source = next(p for p in root.findall("part") if p.get("id") == names[spec["part"]])
+    targets = list(dict.fromkeys(by_clef.values()))
+    first_target = targets[0]
+    ids = {target: f"{source.get('id')}-{i}" if i else source.get("id") for i, target in enumerate(targets)}
+    new_parts = {target: ET.Element("part", {"id": ids[target]}) for target in targets}
+    counts = {target: 0 for target in targets}
+    sign = None
+    states = merge.attribute_states(source)
+    for measure, state in zip(source.findall("measure"), states):
+        clefs = [c.findtext("sign") for a in measure.findall("attributes") for c in a.findall("clef")]
+        if signs is not None and measure.get("number") in signs:
+            sign = signs[measure.get("number")]
+        elif clefs:
+            sign = clefs[0]
+        elif ("clef", "1") in state:
+            sign = state[("clef", "1")].findtext("sign")
+        owner = by_clef.get(sign, first_target)
+        counts[owner] += 1
+        divisions = _divisions(measure, state)
+        own = [t for t in (score._time_signature(a) for a in measure.findall("attributes")) if t]
+        length = own[-1] if own else (score._time_signature(_wrap(state[("time", "1")]))
+                                      if ("time", "1") in state else None)
+        for target in targets:
+            if target == owner:
+                new_parts[target].append(copy.deepcopy(measure))
+                continue
+            rest_bar = ET.Element("measure", dict(measure.attrib))
+            for attributes in measure.findall("attributes"):
+                kept = copy.deepcopy(attributes)
+                for clef in kept.findall("clef"):
+                    kept.remove(clef)
+                if len(kept):
+                    rest_bar.append(kept)
+            for barline in measure.findall("barline"):
+                rest_bar.append(copy.deepcopy(barline))      # repeats and double bars hold in every part
+            if divisions is not None and length is not None:
+                ticks = str(int(length * divisions))
+                position = next((i for i, e in enumerate(rest_bar) if e.tag == "barline"
+                                 and e.get("location") != "left"), len(rest_bar))
+                for offset, element in enumerate(_whole_rests(1, ticks)):
+                    rest_bar.insert(position + offset, element)
+            new_parts[target].append(rest_bar)
+    own = {target: next((s for s, t in by_clef.items() if t == target), None) for target in targets}
+    for target, part in new_parts.items():
+        for clef in part.iter("clef"):                       # a part's clefs are its own clef
+            for child in list(clef):
+                clef.remove(child)
+            ET.SubElement(clef, "sign").text = own[target] or "G"
+            if own[target] in ("F", "G"):
+                ET.SubElement(clef, "line").text = "4" if own[target] == "F" else "2"
+        if own[target] == "percussion":
+            _unpitch(part)
+        first = part.find("measure")
+        if first is not None and first.find("attributes/clef") is None and own[target]:
+            attributes = _measure_attributes(first)
+            clef = ET.Element("clef")
+            ET.SubElement(clef, "sign").text = own[target]
+            if own[target] in ("F", "G"):
+                ET.SubElement(clef, "line").text = "4" if own[target] == "F" else "2"
+            _insert_in_order(attributes, clef)
+    position = list(root).index(source)
+    root.remove(source)
+    for offset, target in enumerate(targets):
+        root.insert(position + offset, new_parts[target])
+    part_list = root.find("part-list")
+    listed = next(sp for sp in part_list.findall("score-part") if sp.get("id") == source.get("id"))
+    index = list(part_list).index(listed)
+    for offset, target in enumerate(targets):
+        entry = listed if offset == 0 else copy.deepcopy(listed)
+        entry.set("id", ids[target])
+        for child in list(entry):
+            if child.tag in ("score-instrument", "midi-instrument"):
+                entry.remove(child)
+        name = entry.find("part-name")
+        if name is None:
+            name = ET.SubElement(entry, "part-name")
+        name.text = target
+        for abbreviation in entry.findall("part-abbreviation"):
+            entry.remove(abbreviation)
+        if offset:
+            part_list.insert(index + offset, entry)
+    return [f"{spec['part']} split by clef: " + ", ".join(f"{t} {counts[t]} bar(s)" for t in targets)]
+
+
+def drop_phantom_bars(root: ET.Element) -> list[str]:
+    """Take out each bar in which no part has a note or rest: Audiveris
+    makes one of the strip between a double bar line and a repeat sign that
+    a time signature sits in. Its attributes (the time) move to the next
+    bar's start, and its bar line too if that bar has none on its left.
+    Returns the bar numbers taken out."""
+    parts = root.findall("part")
+    if not parts:
+        return []
+    numbers = [m.get("number") for m in parts[0].findall("measure")]
+    by_part = [{m.get("number"): m for m in p.findall("measure")} for p in parts]
+    phantom = [n for n in numbers[:-1]
+               if all(n in measures and measures[n].find("note") is None for measures in by_part)]
+    for number in phantom:
+        for part, measures in zip(parts, by_part):
+            measure = measures[number]
+            following = measures.get(numbers[numbers.index(number) + 1])
+            if following is not None:
+                position = 0
+                while position < len(following) and following[position].tag == "print":
+                    position += 1
+                for attributes in reversed(measure.findall("attributes")):
+                    following.insert(position, attributes)
+                if following.find("barline[@location='left']") is None:
+                    for barline in measure.findall("barline"):
+                        barline.set("location", "left")
+                        following.insert(position, barline)
+                        break
+            part.remove(measure)
+    return phantom
+
+
+def share_barlines(root: ET.Element) -> int:
+    """Give every part the bar lines any part has at a bar: a repeat, an
+    ending or a double bar holds for the whole score, but each comes out of
+    the merge only in the parts whose fragment Audiveris read it in, and a
+    part printed alone needs it. Returns how many were copied."""
+    parts = root.findall("part")
+    by_part = [{m.get("number"): m for m in p.findall("measure")} for p in parts]
+    copied = 0
+    for number in (m.get("number") for m in parts[0].findall("measure")) if parts else []:
+        found: dict[str, ET.Element] = {}
+        for measures in by_part:
+            measure = measures.get(number)
+            for barline in measure.findall("barline") if measure is not None else []:
+                found.setdefault(barline.get("location", "right"), barline)
+        for location, barline in found.items():
+            for measures in by_part:
+                measure = measures.get(number)
+                if measure is None or any(b.get("location", "right") == location for b in measure.findall("barline")):
+                    continue
+                if location == "left":
+                    position = 0
+                    while position < len(measure) and measure[position].tag in ("print", "attributes"):
+                        position += 1
+                    measure.insert(position, copy.deepcopy(barline))
+                else:
+                    measure.append(copy.deepcopy(barline))
+                copied += 1
+    return copied
+
+
+def keep_through(root: ET.Element, number: str) -> int:
+    """End every part at the bar numbered `number`: the bars after it go.
+    Returns how many bars each part lost."""
+    lost = 0
+    for part in root.findall("part"):
+        measures = part.findall("measure")
+        last = next((i for i, m in enumerate(measures) if m.get("number") == number), None)
+        if last is None:
+            raise ValueError(f"last_bar: no bar {number} in {part.get('id')}")
+        for measure in measures[last + 1:]:
+            part.remove(measure)
+        lost = len(measures) - last - 1
+    return lost
+
+
 def pad_short_voices(root: ET.Element, assume: Fraction | None = None) -> list[str]:
     """Finish with an invisible rest each voice that stops before the end
     of a bar another voice fills. Notation software leaves a second voice's
@@ -1793,8 +2027,11 @@ def _fix_following_backup(measure: ET.Element, voice: str, divisions: Fraction) 
 def _edit_voice(measure: ET.Element, voice: str, staff: str | None, tokens: list[str],
                 divisions: Fraction) -> None:
     events = _voice_events(measure, voice)
-    # Gaps Audiveris left inside this voice go: the edit says every length.
+    # Gaps Audiveris left inside this voice, or just before it, go: the edit says every length.
     first = list(measure).index(events[0][0]) if events else 0
+    while first and measure[first - 1].tag == "forward" and measure[first - 1].findtext("voice") in (None, voice):
+        measure.remove(measure[first - 1])
+        first -= 1
     last_note = list(measure).index(events[-1][-1]) if events else len(measure)
     for element in list(measure)[first:last_note]:
         if element.tag == "forward":
@@ -1846,9 +2083,31 @@ def _edit_voice(measure: ET.Element, voice: str, staff: str | None, tokens: list
 def _replace_voice(measure: ET.Element, voice: str, staff: str | None, text: str,
                    divisions: Fraction, others: bool) -> None:
     """Replace a voice's notes where they stood. With `others`, every other
-    voice (and every backup and forward) goes too."""
+    voice (and every backup and forward) goes too; without, a voice the bar
+    lacks is added after the others, backed up to the bar's start."""
     new = [n for token in text.split() for n in _build_notes(token, voice, staff, divisions)]
     mine = [e for e in measure if e.tag == "note" and (e.findtext("voice") or "1") == voice]
+    if not others and not mine and measure.find("note") is not None:
+        cursor = 0
+        for element in measure:
+            duration = int(element.findtext("duration") or 0)
+            if element.tag == "note" and element.find("chord") is None:
+                cursor += duration
+            elif element.tag == "backup":
+                cursor -= duration
+            elif element.tag == "forward":
+                cursor += duration
+        position = len(measure)
+        while position and measure[position - 1].tag == "barline":
+            position -= 1
+        if cursor:
+            backup = ET.Element("backup")
+            ET.SubElement(backup, "duration").text = str(cursor)
+            measure.insert(position, backup)
+            position += 1
+        for offset, note in enumerate(new):
+            measure.insert(position + offset, note)
+        return
     if others or not mine:
         for element in [e for e in measure if e.tag in ("note", "backup", "forward")]:
             measure.remove(element)
@@ -1883,7 +2142,9 @@ def apply_patches(root: ET.Element, patches: dict, assume: Fraction | None = Non
         [<patch>, <patch>]          several, in order: one voice each
     Pitches as Bb4, F#5, Bn4; x before the step for an x notehead; ~ before it
     for a tie from the note before, ~ after the length to tie on; a length
-    of g for a grace note (slashed, before the next note: "+C5:g"); @text after
+    of g for a grace note (slashed, before the next note: "+C5:g"), g8, g16 or
+    g32 for an unslashed one printed as that value; s:len for a rest the page
+    does not draw (a voice starting late); @text after
     for a lyric; A/B:len for a fingered tremolo (chord A alternating with
     chord B for len crotchets). Applied last, to the finished score; a
     patched voice must fill its bar exactly."""
@@ -1909,6 +2170,23 @@ def apply_patches(root: ET.Element, patches: dict, assume: Fraction | None = Non
     return report
 
 
+def _fit_patch_divisions(part: ET.Element, measure: ET.Element, state: dict, tokens: list[str]) -> Fraction:
+    """Rescale `part` so every length the patch's tokens name is a whole
+    number of divisions (a triplet quaver needs 3 to the crotchet); the
+    bar's divisions after."""
+    lengths = []
+    for token in tokens:
+        length = token.split("@")[0].rstrip("~").rpartition(":")[2] if ":" in token else token
+        try:
+            lengths.append(Fraction(length))
+        except (ValueError, ZeroDivisionError):
+            pass                                # "-", a grace's g, a tremolo's chords
+    _fit_divisions(part, [[DrumEvent([], n) for n in lengths]])
+    own = _divisions(measure, state)
+    values = {Fraction(d.text) for d in part.iter("divisions") if d.text}
+    return values.pop() if len(values) == 1 else own      # one value after a rescale
+
+
 def _apply_patch(part: ET.Element, measure: ET.Element, state: dict, patch, where: str,
                  assume: Fraction | None) -> None:
     divisions = _divisions(measure, state)
@@ -1925,8 +2203,10 @@ def _apply_patch(part: ET.Element, measure: ET.Element, state: dict, patch, wher
             divisions = _divisions(measure, state)
             _write_drum_voices(measure, *voices[:2], divisions, voices[2])
         elif "notes" in patch:
+            divisions = _fit_patch_divisions(part, measure, state, patch["notes"].split())
             _replace_voice(measure, voice, staff, patch["notes"], divisions, others=not patch.get("voice"))
         else:
+            divisions = _fit_patch_divisions(part, measure, state, patch["edit"].split())
             _edit_voice(measure, voice, staff, patch["edit"].split(), divisions)
             _fix_following_backup(measure, voice, divisions)
     except ValueError as err:
@@ -1948,6 +2228,12 @@ def repair(root: ET.Element, config: dict) -> list[str]:
     report = []
     names = dict(score.part_names(root))
     by_name = {name: pid for pid, name in names.items()}
+    phantom = drop_phantom_bars(root)
+    if phantom:
+        report.append(f"bars with nothing in any part taken out (a time signature's strip): {', '.join(phantom)}")
+    shared = share_barlines(root)
+    if shared:
+        report.append(f"bar lines (repeats, endings, double bars) copied to the parts that lacked them: {shared}")
     parts = {p.get("id"): p for p in root.findall("part")}
 
     report += marks_from_lyrics(root, config.get("vocal_parts", ["Voice"]))
@@ -1968,17 +2254,24 @@ def repair(root: ET.Element, config: dict) -> list[str]:
     aligned = align_time_changes(list(parts.values()), names)
     if aligned:
         report.append(f"time changes another part had, written in: {', '.join(aligned)}")
-
     transpose = config.get("transpose") or {}
     unknown = sorted(set(transpose) - set(by_name))
     bad_kind = sorted({k for k in transpose.values() if k not in TRANSPOSITIONS})
     if unknown or bad_kind:
         raise ValueError(f"transpose names no such part {unknown} or kind {bad_kind} "
                          f"(kinds: {', '.join(TRANSPOSITIONS)})")
-    concert = concert_fifths(root, {by_name[n] for n in transpose})
+    changes = {k: v for k, v in (config.get("transpose_changes") or {}).items() if not k.startswith("_")}
+    for name in changes:
+        if name not in by_name:
+            raise ValueError(f"transpose_changes names no part {name!r}")
+    concert = concert_fifths(root, {by_name[n] for n in transpose} | {by_name[n] for n in changes})
     for name, kind in transpose.items():
-        moved = write_transposition(parts[by_name[name]], kind, concert)
+        moved = write_transposition(parts[by_name[name]], kind, None if name in changes else concert)
         report.append(f"{name}: transposing in {kind}" + (f"; {moved} key(s) moved to the written key" if moved else ""))
+    for name, bars in changes.items():
+        written = write_transpose_changes(parts[by_name[name]], bars)
+        report.append(f"{name}: {written} change(s) of transposition (" +
+                      ", ".join(f"bar {b} {k}" for b, k in bars.items() if not b.startswith("_")) + ")")
 
     for bar, concert in (config.get("key_changes") or {}).items():
         if bar.startswith("_"):

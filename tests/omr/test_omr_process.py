@@ -129,6 +129,24 @@ def test_printed_bars_read_each_page_alone_and_checked(tmp_path):
     assert "page 2: 2 bars at as drawn DPI, printed 2, matches" in progress
 
 
+def test_printed_bars_as_counts_where_the_printed_numbers_skip(tmp_path):
+    piece = tmp_path / "piece"
+    piece.mkdir()
+    (piece / "printed-bars.json").write_text(json.dumps({"_about": "x", "1": 3, "2": 2}))
+    assert process.printed_bars(piece) == {1: 3, 2: 2}
+    assert process.first_printed_bar(piece) == 1
+    (piece / "printed-bars.json").write_text(json.dumps({"1": [5, 7], "2": [8, 9]}))
+    assert process.printed_bars(piece) == {1: 3, 2: 2}
+    assert process.first_printed_bar(piece) == 5
+
+
+def test_patches_name_bars_as_printed_and_go_to_the_read_bar_under_that_number():
+    # The page prints 1, 2, 7: the read numbered them 1, 2, 3.
+    patches = {"_about": "x", "Horn": {"7": "4", "_note": "y"}, "Trumpet": {"2": "4", "9": "4"}}
+    moved = process.by_read_number(patches, {"1": "1", "2": "2", "3": "7"})
+    assert moved == {"_about": "x", "Horn": {"3": "4", "_note": "y"}, "Trumpet": {"2": "4", "9": "4"}}
+
+
 def test_an_interrupted_read_carries_on_without_force(tmp_path, capsys):
     piece = piece_with_pdfs(tmp_path, count=1)
     killed = FakeAudiveris(kill_on=1)
